@@ -1,31 +1,65 @@
 name: resume-ai
+
+# conda-forge only — `defaults` is intentionally omitted.
+# conda-forge supplies python/pip/numpy here, and Anaconda's `defaults`
+# channel carries licensing terms that require a paid licence for larger
+# organisations. Single-channel solves are also faster and unambiguous.
 channels:
   - conda-forge
-  - defaults
+
 dependencies:
-  - python=3.12
+  - python=3.13
   - pip
   - numpy=2.5.3
+
+  # libpq comes from conda-forge so psycopg3 runs in binary mode rather than
+  # falling back to its slower pure-Python libpq implementation. Without this
+  # the environment depends on a system libpq that may not be installed.
+  - libpq=17
+
+  # Everything below is pure-Python or ships a manylinux wheel.
+  # None of these declare a numpy dependency, so pip will not shadow
+  # the conda-forge numpy above (verified against package metadata).
   - pip:
-      - psycopg2-binary==2.9.13
+      # --- web ---
       - fastapi==0.141.1
       - uvicorn[standard]==0.53.0
-      - sqlalchemy==2.0.54
-      - pgvector==0.5.0
-      - pydantic==2.13.5
-      - pydantic-settings==2.15.0
       - python-multipart==0.0.32
       - httpx==0.28.1
-      - boto3==1.43.98
+
+      # --- data ---
+      - sqlalchemy==2.0.54
+      - psycopg2-binary==2.9.13   # pip, not conda's `psycopg2` — avoids cross-channel confusion
+      - pgvector==0.5.0
       - redis==8.1.0
+      - alembic==1.20.0           # schema migrations (make migrate ...)
+
+      # psycopg3 is a SEPARATE driver from psycopg2 and both are required:
+      # SQLAlchemy uses psycopg2, LangGraph's PostgresSaver requires psycopg3.
+      # The [binary] extra bundles libpq so this works off-conda too.
+      - psycopg[binary]==3.3.6
+      - psycopg-pool==3.3.2
+
+      # --- config ---
+      - pydantic==2.13.5
+      - pydantic-settings==2.15.0
+
+      # --- object storage ---
+      - boto3==1.43.98
+
+      # --- agents ---
       - langgraph==1.2.11
       - langchain==1.4.2
       - langchain-openai==1.6.2
       - langgraph-checkpoint-sqlite==3.1.1
       - langgraph-checkpoint-postgres==3.1.2
+
+      # --- documents ---
       - pypdf==6.19.0
-      - python-docx==1.2.0
-      - fpdf2==2.8.8
+      - python-docx==1.2.0        # imports as `docx`
+      - fpdf2==2.8.8              # imports as `fpdf`
       - jinja2==3.1.6
+
+      # --- dev ---
       - pytest==9.1.1
       - ruff==0.16.8

@@ -4,15 +4,15 @@ services:
     container_name: resumeai-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: resumeai
-      POSTGRES_PASSWORD: resumeai
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: Admin123
       POSTGRES_DB: resumeai
     ports:
-      - "5433:5432"          # 5433 avoids clashing with a local 5432
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U resumeai -d resumeai"]
+      test: ["CMD-SHELL", "pg_isready -U admin -d resumeai"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -23,11 +23,26 @@ services:
     restart: unless-stopped
     ports:
       - "6379:6379"
+    volumes:
+      - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 20
+
+  redis-insight:
+    image: redis/redisinsight:latest
+    container_name: resumeai-redis-insight
+    restart: unless-stopped
+    ports:
+      - "5540:5540"
+    volumes:
+      # Without this the saved Redis connection is lost on every restart.
+      - redisinsightdata:/data
+    depends_on:
+      redis:
+        condition: service_healthy
 
   minio:
     image: quay.io/minio/minio:latest
@@ -35,11 +50,13 @@ services:
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: resumeai
-      MINIO_ROOT_PASSWORD: resumeai123
+      # These are the ONLY MinIO credentials. minio-init and the app must
+      # both use exactly these values.
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
     ports:
-      - "9000:9000"          # S3 API
-      - "9001:9001"          # web console
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # web console
     volumes:
       - miniodata:/data
     healthcheck:
@@ -55,16 +72,18 @@ services:
       minio:
         condition: service_healthy
     restart: on-failure
+    # Credentials below MUST match MINIO_ROOT_USER / MINIO_ROOT_PASSWORD above.
     entrypoint: >
       /bin/sh -c "
-      mc alias set local http://minio:9000 resumeai resumeai123;
-      mc mb --ignore-existing local/resumeai-uploads;
-      mc mb --ignore-existing local/resumeai-exports;
-      mc anonymous set download local/resumeai-exports;
-      echo 'buckets ready';
-      exit 0;
+      mc alias set local http://minio:9000 minio minio123 &&
+      mc mb --ignore-existing local/resumeai-uploads &&
+      mc mb --ignore-existing local/resumeai-exports &&
+      mc anonymous set download local/resumeai-exports &&
+      echo 'buckets ready'
       "
 
 volumes:
   pgdata:
   miniodata:
+  redisdata:
+  redisinsightdata:
