@@ -1,7 +1,436 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
 
+/* Dark is opt-IN via <html class="dark">. Light is the default, so a failed
+   theme lookup degrades to a readable page rather than white-on-white. */
+@custom-variant dark (&:is(.dark *));
 
-@theme {
-  --color-brand: #2563eb;
-  --font-display: "Inter", sans-serif;
+/* ---------------------------------------------------------------------------
+   1. PALETTE PRIMITIVES — raw values, theme-independent.
+
+   Nothing in a component may reference these directly. They are the crayon
+   box; §2 decides which crayon each theme reaches for. Naming them once means
+   a brand tweak is one edit, not a search across two theme blocks.
+--------------------------------------------------------------------------- */
+:root {
+  --brand-900: #101018; /* palette "Deep Blue" base */
+  --brand-700: #3529bf; /* gradient stop 2 */
+  --brand-500: #4737ff; /* "Vivid Blue" — the brand */
+  --brand-400: #8075ff; /* derived: readable as text on dark */
+  --brand-300: #aca5ff; /* gradient stop 4 */
+  --brand-200: #d1cdff; /* "Pale Blue" */
+
+  --neutral-900: #202030;
+  --neutral-800: #2a2a3d;
+  --neutral-700: #35354a;
+  --neutral-500: #5e5e6a; /* "Stone Gray" */
+  --neutral-400: #9a9aa6; /* derived: readable on dark */
+  --neutral-300: #55555f; /* derived: readable on light */
+  --neutral-100: #ededf4;
+  --neutral-50: #f6f6fa;
+
+  --orange-500: #f75c03; /* "Vivid Orange" */
+  --orange-700: #b94502; /* derived: #F75C03 is only 3.24 on white */
+
+  /* Accept / Reject. Shades differ per theme AND are chosen for protanopia
+     separation — see the note above --accept-fill below. */
+  --green-300: #6ee7b7;
+  --green-500: #10b981;
+  --green-700: #047857;
+  --red-400: #f87171;
+  --red-600: #dc2626;
+  --red-700: #b91c1c;
+
+  --paper: #ffffff;
+  --ink: #101018;
+}
+
+/* ---------------------------------------------------------------------------
+   2. SEMANTIC TOKENS — LIGHT (default)
+
+   Every value below was measured against WCAG AA (4.5 body text, 3.0 UI).
+   Ratios in comments are against the surface the token normally sits on.
+--------------------------------------------------------------------------- */
+:root {
+  --surface-base: var(--paper);
+  --surface-1: var(--neutral-50);
+  --surface-2: var(--neutral-100);
+  --surface-3: #e3e3ee;
+
+  --text-strong: var(--ink); /* 17.56 on surface-1 */
+  --text-muted: var(--neutral-300); /* 6.83  — NOT #5E5E6A */
+  --text-accent: var(--brand-700); /* 8.77 */
+
+  /* The brand fill is IDENTICAL in both themes — that is what keeps the
+     product recognisable. Only the text-weight companion changes. */
+  --brand-fill: var(--brand-500); /* white label: 6.44 */
+  --brand-fill-hover: var(--brand-700);
+  --brand-on-fill: var(--paper);
+  --brand-text: var(--brand-500); /* 5.98 on surface-1 */
+
+  --edit-fill: var(--brand-300); /* dark label: 8.64 */
+  --edit-on-fill: var(--ink);
+  --mark-bg: var(--brand-200); /* dark text: 12.52 */
+  --mark-text: var(--ink);
+
+  --warn-text: var(--orange-700); /* 4.98 — #F75C03 fails at 3.00 */
+  --warn-fill: var(--orange-500);
+  --warn-on-fill: var(--ink); /* 5.85; white on orange is only 3.24 */
+
+  /* Accept = green fill, Reject = red ghost.
+     Light needs DARK shades: the pale ones used on dark score ~2 on white. */
+  --accept-fill: var(--green-700); /* white label: 5.48 */
+  --accept-on-fill: var(--paper);
+  --accept-text: var(--green-700); /* 5.09 on surface-1 */
+  --reject-text: var(--red-700); /* 6.00 on surface-1 */
+  --reject-border: var(--red-700);
+  --reject-fill: var(--red-700); /* white label: 6.47 (destructive dialogs) */
+  --reject-on-fill: var(--paper);
+
+  --line: #d8d8e2;
+  --line-soft: var(--neutral-100);
+
+  --focus-ring: var(--brand-500);
+
+  /* The resume is a printable document. It is white in BOTH themes. */
+  --paper-bg: var(--paper);
+  --paper-ink: #111111;
+  --paper-muted: #555555;
+  --paper-line: #e2e2e2;
+}
+
+/* ---------------------------------------------------------------------------
+   2b. SEMANTIC TOKENS — DARK
+
+   The same token names. This is the only block that changes, which is why no
+   component needs editing to support a theme.
+
+   NOTE the inversion: on dark, #4737FF as TEXT scores 2.49 and is unusable,
+   so text falls back to --brand-400. On light, --brand-400 scores 3.56 and is
+   unusable, so text uses #4737FF. Same role, opposite value. This is the trap
+   in "just invert the colours".
+--------------------------------------------------------------------------- */
+.dark {
+  --surface-base: var(--brand-900);
+  --surface-1: var(--neutral-900);
+  --surface-2: var(--neutral-800);
+  --surface-3: var(--neutral-700);
+
+  --text-strong: var(--paper); /* 16.02 on surface-1 */
+  --text-muted: var(--neutral-400); /* 5.76  — NOT #5E5E6A (2.51) */
+  --text-accent: var(--brand-200); /* 10.60 */
+
+  --brand-fill: var(--brand-500); /* unchanged: white label 6.44 */
+  --brand-fill-hover: var(--brand-400);
+  --brand-on-fill: var(--paper);
+  --brand-text: var(--brand-400); /* 4.51 — #4737FF would be 2.49 */
+
+  --edit-fill: var(--brand-300); /* dark label: 8.64 */
+  --edit-on-fill: var(--ink);
+  --mark-bg: var(--brand-200); /* dark text: 12.52 */
+  --mark-text: var(--ink);
+
+  --warn-text: var(--orange-500); /* 4.95 on surface-1 */
+  --warn-fill: var(--orange-500);
+  --warn-on-fill: var(--ink);
+
+  /* Dark needs LIGHT shades: #047857 scores 2.92 here, #B91C1C only 2.48.
+     emerald-300 / red-400 give the widest protanopia separation (99.0). */
+  --accept-fill: var(--green-500); /* ink label: 7.46 */
+  --accept-on-fill: var(--ink);
+  --accept-text: var(--green-300); /* 10.51 on surface-1 */
+  --reject-text: var(--red-400); /* 5.79 on surface-1 */
+  --reject-border: var(--red-400);
+  --reject-fill: var(--red-600); /* white label: 4.83 */
+  --reject-on-fill: var(--paper);
+
+  --line: var(--neutral-500); /* decorative only, never text */
+  --line-soft: var(--neutral-800);
+
+  --focus-ring: var(--brand-400);
+
+  --paper-bg: var(--paper);
+  --paper-ink: #111111;
+  --paper-muted: #555555;
+  --paper-line: #e2e2e2;
+}
+
+/* ---------------------------------------------------------------------------
+   2c. WHY ACCEPT/REJECT SHADES DIFFER PER THEME
+
+   Green and red are the one pairing with a real accessibility trap: under
+   protanopia (red-blind, ~1% of men) a mid green and a mid red collapse to
+   almost the same colour. Measured, emerald-500 vs red-400 simulate to an RGB
+   distance of 32 — indistinguishable.
+
+   The chosen pairs were selected for protan separation, not just contrast:
+
+     dark   accept #6EE7B7 text / #10B981 fill   protan distance 99.0
+     light  accept #047857 text+fill             protan distance 173.6
+            reject #F87171 (dark) / #B91C1C (light)
+
+   Shades had to differ per theme regardless: #047857 scores 2.92 on the dark
+   surface, and #B91C1C only 2.48 — both unreadable. The pale variants fail
+   just as badly on light (~2.0).
+
+   Colour is still never the only signal. Accept is a filled button, Reject is
+   a ghost with a border, and both carry text labels. If the hues were
+   identical the controls would remain distinguishable.
+
+   One accepted compromise: in light mode the warning orange (#B94502) and the
+   reject red (#B91C1C) sit 48.5 apart, which is close. Moving the warning to
+   an olive #7A5B00 would fix it but abandons the brand orange entirely. They
+   are a bordered chip and a ghost button, never adjacent, so hue fidelity wins.
+--------------------------------------------------------------------------- */
+
+/* ---------------------------------------------------------------------------
+   3. TAILWIND UTILITIES
+
+   `@theme inline` emits utilities that resolve the var at USE time, so one
+   set of class names follows the active theme. A plain `@theme` would bake
+   in the light value and dark mode would silently do nothing.
+--------------------------------------------------------------------------- */
+@theme inline {
+  --color-base: var(--surface-base);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+
+  --color-content: var(--text-strong);
+  --color-content-muted: var(--text-muted);
+  --color-content-accent: var(--text-accent);
+
+  --color-brand: var(--brand-fill);
+  --color-brand-hover: var(--brand-fill-hover);
+  --color-on-brand: var(--brand-on-fill);
+  --color-brand-text: var(--brand-text);
+
+  --color-edit: var(--edit-fill);
+  --color-on-edit: var(--edit-on-fill);
+  --color-mark: var(--mark-bg);
+  --color-on-mark: var(--mark-text);
+
+  --color-warning: var(--warn-text);
+  --color-warning-fill: var(--warn-fill);
+  --color-on-warning: var(--warn-on-fill);
+
+  --color-accept: var(--accept-fill);
+  --color-on-accept: var(--accept-on-fill);
+  --color-accept-text: var(--accept-text);
+  --color-reject: var(--reject-fill);
+  --color-on-reject: var(--reject-on-fill);
+  --color-reject-text: var(--reject-text);
+  --color-reject-border: var(--reject-border);
+
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+
+  --color-paper: var(--paper-bg);
+  --color-paper-ink: var(--paper-ink);
+  --color-paper-muted: var(--paper-muted);
+  --color-paper-line: var(--paper-line);
+
+  --font-display: var(--font-sans);
+}
+
+/* ---------------------------------------------------------------------------
+   4. SHADCN BRIDGE
+
+   shadcn primitives are hardcoded to --background/--foreground/--primary/etc.
+   Pointing those at our tokens is what stops every dialog and button shipping
+   its own neutral grey.
+
+   The oklch() greys that `shadcn init` wrote are deliberately GONE. They were
+   a parallel, conflicting palette.
+
+   CRITICAL: shadcn's own `@theme inline` block (which init appends) maps
+   --color-primary -> var(--primary). Our brand also wanted --color-primary.
+   Last definition wins, so the brand blue was being overwritten by shadcn's
+   near-black --primary. Our fill is therefore named `--color-brand`
+   (`bg-brand`), never `--color-primary`. Do not "tidy" this by renaming it.
+--------------------------------------------------------------------------- */
+:root,
+.dark {
+  --background: var(--surface-base);
+  --foreground: var(--text-strong);
+
+  --card: var(--surface-1);
+  --card-foreground: var(--text-strong);
+  --popover: var(--surface-3);
+  --popover-foreground: var(--text-strong);
+
+  --primary: var(--brand-fill);
+  --primary-foreground: var(--brand-on-fill);
+  --secondary: var(--surface-2);
+  --secondary-foreground: var(--text-strong);
+
+  --muted: var(--surface-2);
+  --muted-foreground: var(--text-muted);
+  --accent: var(--surface-2);
+  --accent-foreground: var(--text-accent);
+
+  /* shadcn's destructive is a DELETE action, not our "Needs work" warning. */
+  --destructive: var(--reject-fill);
+  --destructive-foreground: var(--reject-on-fill);
+
+  --border: var(--line-soft);
+  --input: var(--line);
+  --ring: var(--focus-ring);
+
+  --radius: 0.625rem;
+
+  /* Charts: the brand ramp, not shadcn's greyscale. */
+  --chart-1: var(--brand-500);
+  --chart-2: var(--brand-400);
+  --chart-3: var(--brand-300);
+  --chart-4: var(--brand-700);
+  --chart-5: var(--orange-500);
+
+  /* Sidebar is unused today; aliased so nothing renders invisible if added. */
+  --sidebar: var(--surface-1);
+  --sidebar-foreground: var(--text-strong);
+  --sidebar-primary: var(--brand-fill);
+  --sidebar-primary-foreground: var(--brand-on-fill);
+  --sidebar-accent: var(--surface-2);
+  --sidebar-accent-foreground: var(--text-accent);
+  --sidebar-border: var(--line-soft);
+  --sidebar-ring: var(--focus-ring);
+}
+
+/* shadcn's own colour utilities.
+   `shadcn/tailwind.css` ships ONLY keyframes, variants and effect utilities —
+   it does NOT generate `bg-background`, `border-border` or `text-foreground`.
+   `shadcn init` normally writes these, and they were removed together with the
+   oklch greys, so they are restored here pointing at OUR tokens. Without this
+   block `@apply border-border` in §6 fails the build outright.
+
+   --color-primary resolves via --primary, which §4 aliases to the brand fill,
+   so bg-primary and bg-brand agree. Prefer `bg-brand` in our own components;
+   `bg-primary` exists for the shadcn primitives that hardcode it. */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}
+
+/* shadcn's radius + font utilities. Kept from init — these do not conflict. */
+@theme inline {
+  --font-heading: var(--font-sans);
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* ---------------------------------------------------------------------------
+   5. PROJECT UTILITIES
+--------------------------------------------------------------------------- */
+
+/* The one hero gradient, from the palette's four stops. Used exactly once —
+   the "Tailor Resume to Another Job" pill. Fixed values in both themes:
+   it is a brand asset, not a themed surface. */
+@utility bg-brand-gradient {
+  background-image: linear-gradient(
+    90deg,
+    #101018 0%,
+    #3529bf 35%,
+    #4737ff 70%,
+    #aca5ff 100%
+  );
+}
+
+/* Gradient border for that same pill: a gradient background with an inset
+   solid fill, so only the 1px edge shows through. */
+@utility border-brand-gradient {
+  border: 1px solid transparent;
+  background-image:
+    linear-gradient(var(--surface-1), var(--surface-1)),
+    linear-gradient(90deg, #3529bf, #4737ff, #aca5ff);
+  background-origin: border-box;
+  background-clip: padding-box, border-box;
+}
+
+/* ---------------------------------------------------------------------------
+   6. BASE
+--------------------------------------------------------------------------- */
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    @apply font-sans;
+    height: 100%;
+    /* Correct native form controls and scrollbars per theme. */
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Keyboard focus only — a visible ring on every mouse click is noise. */
+  :focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--brand-fill);
+    color: var(--brand-on-fill);
+  }
 }
