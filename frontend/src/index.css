@@ -193,7 +193,12 @@
    in the light value and dark mode would silently do nothing.
 --------------------------------------------------------------------------- */
 @theme inline {
-  --color-base: var(--surface-base);
+  /* NOT --color-base: that would generate a `text-base` COLOUR utility which
+     shadows Tailwind's built-in `text-base` FONT-SIZE, and silently drops the
+     rest of the size scale (text-lg stopped being emitted at all).
+     dialog.tsx relies on the real text-base. Never name a colour after a
+     font-size step: xs sm base lg xl 2xl... */
+  --color-canvas: var(--surface-base);
   --color-surface-1: var(--surface-1);
   --color-surface-2: var(--surface-2);
   --color-surface-3: var(--surface-3);
@@ -271,8 +276,16 @@
   --accent: var(--surface-2);
   --accent-foreground: var(--text-accent);
 
-  /* shadcn's destructive is a DELETE action, not our "Needs work" warning. */
-  --destructive: var(--reject-fill);
+  /* shadcn's destructive is a DELETE action, not our "Needs work" warning.
+
+     The base-nova Button renders destructive as a TINTED CHIP, not a solid
+     fill: `bg-destructive/10 text-destructive` (dark: /20). So --destructive
+     is its own LABEL colour sitting on a faint wash of itself — it is not a
+     background behind white text. It therefore needs the readable-as-text
+     shade, which is exactly --reject-text.
+       light  #B91C1C on #F8E8E8 wash -> 5.45
+       dark   #F87171 on #46212E wash -> 5.00   (#DC2626 gave only 2.87) */
+  --destructive: var(--reject-text);
   --destructive-foreground: var(--reject-on-fill);
 
   --border: var(--line-soft);

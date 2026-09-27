@@ -1,0 +1,18 @@
+# Real configuration. Holds UNOROUTER_API_KEY and the database password.
+# .env.example is the committed template; this file never is.
+.env
+.env.local
+.env.*.local
+
+# Local interpreter, if you use a venv instead of the conda env.
+.venv/
+
+# Generated on first `make migrate`; machine-specific paths.
+alembic.ini
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/

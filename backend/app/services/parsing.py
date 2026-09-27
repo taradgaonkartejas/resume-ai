@@ -5,14 +5,18 @@ can refine the result later; the rule path must always produce something usable.
 """
 
 import io
+import logging
 import re
 
 from app.config import settings
 from app.models import Resume
 from app.repositories.resume_repository import ResumeRepository
+from app.repositories.vector_repository import VectorRepository
 from app.services import storage
 from app.services.exceptions import ResumeNotFound
-from app.services.resume_ops import empty_resume
+from app.services.resume_ops import empty_resume, migrate
+
+logger = logging.getLogger(__name__)
 
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
 _PHONE_RE = re.compile(r"(\+?\d[\d\s().-]{7,}\d)")
@@ -67,6 +71,27 @@ def structure_text(raw: str) -> dict:
         first = non_empty[0].strip()
         if len(first) < 60 and "@" not in first:
             data["contact"]["name"] = first
+
+            # The line straight after the name is the professional title on
+            # essentially every resume layout ("Dental Office Manager").
+            # Only accept it when it looks like a title rather than contact
+            # data or a section heading, so we never promote "email | phone"
+            # into the headline.
+            if len(non_empty) > 1:
+                second = non_empty[1].strip()
+                looks_like_contact = (
+                    "@" in second
+                    or _PHONE_RE.search(second)
+                    or _LINK_RE.search(second)
+                    or "|" in second
+                )
+                if (
+                    2 < len(second) <= 60
+                    and not looks_like_contact
+                    and _classify(second) is None
+                    and not _BULLET_RE.match(second)
+                ):
+                    data["contact"]["headline"] = second
 
     email = _EMAIL_RE.search(raw)
     if email:
@@ -149,12 +174,20 @@ def structure_text(raw: str) -> dict:
         if values:
             data["skills"].append({"label": label.strip(), "items": values})
 
-    return data
+    # Uploads land already-migrated, so a parsed resume and a hand-edited one
+    # are the same shape from the first byte.
+    return migrate(data)
 
 
 class ParsingService:
-    def __init__(self, resumes: ResumeRepository) -> None:
+    def __init__(
+        self,
+        resumes: ResumeRepository,
+        vectors: VectorRepository | None = None,
+    ) -> None:
         self.resumes = resumes
+        # Optional so existing construction sites keep working.
+        self.vectors = vectors
 
     def parse_resume(self, resume_id, user_id) -> Resume:
         resume = self.resumes.get_owned(resume_id, user_id)
@@ -172,4 +205,27 @@ class ParsingService:
             resume.parse_status = "failed"
             resume.parse_note = f"{type(exc).__name__}: {exc}"
         self.resumes.db.commit()
+
+        # Index AFTER the commit: uploaded resumes were previously never
+        # indexed at all (only the seeder called index_resume), so the writer
+        # agent had no grounding bullets to retrieve for anything the user
+        # actually uploaded.
+        if resume.parse_status == "ready":
+            self._index(resume)
+            self.resumes.db.commit()
         return resume
+
+    def _index(self, resume: Resume) -> int:
+        """Never fatal: a parsed resume the user can edit and export beats a
+        failed upload because an embedding call timed out."""
+        if self.vectors is None:
+            return 0
+        try:
+            from app.ai.vectorstore import VectorStore
+
+            return VectorStore(self.vectors).index_resume(
+                resume.user_id, resume.id, resume.structured_data or {}
+            )
+        except Exception as exc:  # noqa: BLE001 — degraded retrieval, not a failed upload
+            logger.warning("Indexing resume %s failed: %s", resume.id, exc)
+            return 0

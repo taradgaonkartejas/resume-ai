@@ -77,6 +77,18 @@ class Resume(Base):
     template_key: Mapped[str] = mapped_column(
         String(40), ForeignKey("templates.key"), default="modern"
     )
+    # "base" = uploaded or created directly; "tailored" = forked for a job.
+    # Drives the All / Base / Tailored tabs in the library.
+    kind: Mapped[str] = mapped_column(String(20), default="base", index=True)
+    # Provenance. SET NULL, not CASCADE: deleting a base resume must never
+    # silently delete the tailored versions the user already sent to employers.
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("resumes.id", ondelete="SET NULL"), nullable=True
+    )
+    # Denormalised JD label ("Senior Engineer at Cognizant") for the card
+    # subtitle. Joining sessions -> job_descriptions for every row of a list
+    # view is a lot of machinery for one string.
+    tailored_for: Mapped[str] = mapped_column(String(200), default="")
     version_cursor: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(

@@ -1,13 +1,25 @@
 # Short aliases for the schema CLI — the `npx prisma ...` equivalent.
 # Every target just forwards to `python -m app.cli`.
 
-# Use the local venv if it exists, otherwise whatever python is on PATH
-# (i.e. the active conda env). Hardcoding .venv/bin/python breaks conda users.
-PY := $(shell test -x .venv/bin/python && echo .venv/bin/python || echo python)
+# Interpreter resolution, in priority order:
+#   1. a local .venv, if you use one
+#   2. $CONDA_PREFIX — the ACTIVATED env, which is authoritative
+#   3. plain `python` from PATH
+#
+# Step 2 exists because "python on PATH" and "the activated conda env" are not
+# the same thing. On Anaconda installs that put base on the system PATH, the
+# prompt can read (resume-ai) while `python` still resolves to base — and then
+# every package installed into the env is invisible. The symptom is a
+# ModuleNotFoundError for something `conda list` plainly shows as installed.
+# $CONDA_PREFIX is set by `conda activate` itself, so it cannot disagree.
+PY := $(shell \
+	if [ -x .venv/bin/python ]; then echo .venv/bin/python; \
+	elif [ -n "$$CONDA_PREFIX" ] && [ -x "$$CONDA_PREFIX/bin/python" ]; then echo "$$CONDA_PREFIX/bin/python"; \
+	else echo python; fi)
 
 # Windows: use .\make.ps1 <target> instead — same target names.
 
-.PHONY: help up down logs ps env env-update db-push db-status db-seed db-reset \
+.PHONY: help up down logs ps doctor which-python env env-file env-update db-push db-status db-seed db-reset \
         db-inspect db-sql db-create db-drop migrate migrate-deploy migrate-status \
         migrate-down test lint run
 
@@ -18,9 +30,15 @@ help:
 	@echo "  make logs             follow logs"
 	@echo "  make down             stop (volumes survive)"
 	@echo ""
-	@echo "Environment (environment.yaml is the source of truth)"
+	@echo "Environment (environment.yaml = packages, .env = settings)"
+	@echo "  make env-file         create backend/.env from .env.example"
+	@echo "  make which-python     show which interpreter these targets use"
+	@echo "  make doctor           diagnose a broken environment"
 	@echo "  make env              conda env create -f environment.yaml"
 	@echo "  make env-update       conda env update --prune"
+	@echo ""
+	@echo "  backend/.env is THIS directory's config and holds real secrets."
+	@echo "  The browser app is configured separately in frontend/.env.local."
 	@echo ""
 	@echo "Schema (app/models.py is the source of truth)"
 	@echo "  make db-push          create database + tables to match the models"
@@ -52,6 +70,28 @@ logs:
 
 down:
 	cd .. && docker compose down
+
+# Print the interpreter these targets will actually use. First thing to check
+# when an import fails for a package `conda list` says is installed.
+which-python:
+	@echo "$(PY)"
+	@$(PY) -c "import sys; print('prefix :', sys.prefix)"
+	@$(PY) -c "import os; print('CONDA_PREFIX:', os.environ.get('CONDA_PREFIX', '(unset)'))"
+	@$(PY) -c "import importlib.util as u; print('fastapi:', 'OK' if u.find_spec('fastapi') else 'MISSING')"
+
+doctor:
+	$(PY) doctor.py
+
+# Never clobber an existing .env: it holds the only copy of the API key, and
+# a task runner that silently overwrites secrets is a task runner nobody can
+# trust. Re-running this is always safe.
+env-file:
+	@if [ -f .env ]; then \
+		echo "backend/.env already exists — leaving it alone."; \
+	else \
+		cp .env.example .env; \
+		echo "created backend/.env — add UNOROUTER_API_KEY (optional)."; \
+	fi
 
 env:
 	conda env create -f environment.yaml

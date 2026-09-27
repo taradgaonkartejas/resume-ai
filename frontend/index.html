@@ -1,10 +1,43 @@
 <!doctype html>
-<html lang="en">
+<!--
+  class="dark" is set here, in the served HTML, rather than by React on mount.
+  Setting it later means the first paint is light and the UI flashes white
+  before the app hydrates. The theme toggle flips this same class at runtime.
+  Dark is the product default; light is a supported extension.
+-->
+<html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+    <!-- Keeps native scrollbars/form controls in step with the class above
+         before any CSS loads. index.css sets this per-theme too. -->
+    <meta name="color-scheme" content="dark light" />
+    <title>ResumeAI</title>
+    <!--
+      Runs before the bundle so the stored theme is on <html> at FIRST paint.
+      Doing this in React means one frame of dark before flipping to light,
+      which reads as a flicker on every load.
+
+      The key format is duplicated from src/lib/theme.ts on purpose: this must
+      run with no imports. Keep the two in step.
+    -->
+    <script>
+      (function () {
+        try {
+          var P = "resumeai.theme.";
+          var user = localStorage.getItem("resumeai.activeUserId");
+          var t =
+            (user && localStorage.getItem(P + user)) ||
+            localStorage.getItem(P + "anonymous");
+          if (t !== "dark" && t !== "light") t = "dark";
+          document.documentElement.classList.toggle("dark", t === "dark");
+          document.documentElement.style.colorScheme = t;
+        } catch (e) {
+          /* storage blocked: the class="dark" default already applies */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

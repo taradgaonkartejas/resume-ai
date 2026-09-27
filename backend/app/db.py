@@ -1,5 +1,6 @@
 
 import logging
+import os
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import make_url
@@ -22,11 +23,20 @@ def _sqlite_url() -> str:
 
 
 def _make_engine():
+    # Commands that only need table metadata (DDL generation) set this so an
+    # unreachable database is not a hard failure. The engine is still built, it
+    # is simply never probed — nothing may execute against it.
+    if os.environ.get("RESUMEAI_NO_DB_PROBE") == "1":
+        url = settings.database_url
+        return create_engine(url, pool_pre_ping=True), make_url(url).get_backend_name()
+
     try:
         eng = create_engine(settings.database_url, pool_pre_ping=True)
         with eng.connect() as conn:
             conn.execute(text("SELECT 1"))
-        return eng, "postgresql"
+        # Report what we actually connected to, not what we hoped for: an
+        # explicit --url/DATABASE_URL may legitimately point at SQLite.
+        return eng, eng.dialect.name
     except Exception as exc:
         if not settings.allow_sqlite_fallback:
             raise

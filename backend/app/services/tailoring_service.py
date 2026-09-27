@@ -70,12 +70,27 @@ class TailoringService:
         user_id: uuid.UUID,
         jd_title: str,
         jd_content: str,
+        fork: bool = False,
+        resume_service=None,
     ) -> TailoringSession:
         resume = self.resumes.get_owned(resume_id, user_id)
         if resume is None:
             raise ResumeNotFound(str(resume_id))
         if not jd_content or not jd_content.strip():
             raise ValidationError("Job description content is required")
+
+        # Fork BEFORE running the graph so every suggestion, version and
+        # accepted edit belongs to the child. The base resume is never
+        # touched, which is what lets one base serve many job applications.
+        if fork and resume_service is not None:
+            label = jd_title.strip() or "Untitled role"
+            resume = resume_service.fork(
+                resume.id,
+                user_id,
+                title=f"{resume.title} - {label}",
+                tailored_for=label,
+            )
+            resume_id = resume.id
 
         data = resume.structured_data or {}
         thread_id = f"tailor-{uuid.uuid4()}"

@@ -1,78 +1,144 @@
-# React + TypeScript + Vite
+# ResumeAI Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React 19 + TypeScript + Vite. shadcn/ui on `@base-ui/react`, Tailwind v4,
+TanStack Query for server state, `useReducer` + Context for UI state.
 
-Currently, two official plugins are available:
+Dark mode first. No Next.js, no Radix, no Aceternity.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Quick start
 
-## React Compiler
-
-The React Compiler is enabled on this template. See [this documentation](https://react.dev/learn/react-compiler) for more information.
-
-Note: This will impact Vite dev & build performances.
-You can also try [the experimental native React Compiler support in plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react/README.md#rust-react-compiler) by using `compiler: true` in the plugin options instead of using the Babel plugin.
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
+```bash
+cd frontend
+npm install
+cp .env.example .env.local     # optional; the defaults are correct for local dev
+npm run dev                    # http://localhost:5173
 ```
 
-You can also install [eslint-plugin-react-x](https://npmx.dev/package/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://npmx.dev/package/eslint-plugin-react-dom) for React-specific lint rules:
+The backend is a separate process. Start it first (see `../backend/README.md`):
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+```bash
+cd backend && make run         # Windows: .\make.ps1 run
+```
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+**You do not need the real backend to work on the UI.** `mock-api.py` is a
+stdlib-only stand-in that implements the whole surface:
+
+```bash
+python mock-api.py             # :8000, same contract, no database
+```
+
+It is not a set of canned fixtures — it ports the real scoring algorithm, so
+the score the UI shows against the mock is the score the real API computes.
+That is enforced, not hoped for: the verifier scripts below run against both
+targets and must return identical counts.
+
+## Configuration
+
+`frontend/.env.local` is this app's config. `backend/.env` is the server's.
+They are separate files on purpose, and only one of them holds secrets.
+
+| | `frontend/.env.local` | `backend/.env` |
+|---|---|---|
+| Read by | Vite, at build time | the FastAPI process, at startup |
+| Prefix | `VITE_` only | none |
+| Visible to the browser | **yes, always** | no |
+| Safe for secrets | **no** | yes |
+| Template | `.env.example` | `backend/.env.example` |
+
+Vite inlines `VITE_*` values into the bundle at build time. Anything here ships
+to the client in plain text — there is no such thing as a private value in this
+file. The UnoRouter key and the database password live in `backend/.env`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `VITE_API_BASE_URL` | *(empty)* | Leave empty for local dev. Empty means same-origin requests to `/api`, which the Vite proxy forwards to `localhost:8000` — so there is no CORS negotiation at all. Set it only when the API is on another origin, and include the `/api` suffix. |
+| `VITE_API_TIMEOUT_MS` | `90000` | Matches `LLM_TIMEOUT_SECONDS=90` in `backend/.env`. The tailor endpoint runs a multi-agent pass with a critic loop; the free tier averages ~10 s per call and the graph makes several. |
+
+Changing `.env.local` requires a dev-server restart — Vite reads env files at
+startup, not per request.
+
+## Scripts
+
+| Command | What it does |
+|---|---|
+| `npm run dev` | Vite dev server on :5173, `/api` proxied to :8000 |
+| `npm run build` | `tsc -b` then `vite build` |
+| `npm run lint` | ESLint. Should be **zero** errors |
+| `npm run preview` | Serve the built bundle |
+
+Do not run `vite build` while the dev server is running — the sandbox runs out
+of memory and the build dies with exit 137.
+
+### Verifier scripts
+
+There is no unit-test runner here. Three standalone probes cover what actually
+breaks, and each one must pass against **both** the real backend and
+`mock-api.py`:
+
+```bash
+node scripts/verify-gateway.mjs        # 14 checks — axios layer, error mapping
+node scripts/verify-api-surface.mjs    # 96 checks — every one of the 28 operations
+node scripts/verify-date-parity.mjs    # 33 checks — client/server date agreement
+```
+
+`verify-date-parity.mjs` guards the one rule that is deliberately implemented
+twice. The live preview renders the user's *unsaved* draft, so it cannot ask
+the server what a date range looks like mid-keystroke; `src/lib/dates.ts`
+mirrors `resume_ops.date_label()`. The script transpiles the real TypeScript
+module rather than restating its logic, then compares it against the real
+server's output — so it cannot pass while the shipped code is wrong.
+
+Start the backend (or the mock) before running any of them.
+
+## Layout
 
 ```
+frontend/
+├── .env.example        template for .env.local
+├── mock-api.py         stdlib backend stand-in; ports the real scoring algorithm
+├── scripts/            the three verifier probes
+└── src/
+    ├── app/            router, providers, shell
+    ├── features/       one folder per pane — resumes, templates, analysis,
+    │                   tailor, chat, preview, workspace
+    ├── components/ui/  shadcn primitives, vendored from the registry
+    ├── api/            client.ts (axios + ApiError), queries.ts (TanStack keys)
+    ├── services/       one module per API resource; the only place URLs appear
+    └── lib/            AppState reducer, score bands, dateLabel
+```
+
+Data flows one way: **components → `api/queries.ts` → `services/` → `api/client.ts`**.
+Components never build a URL and never call axios directly.
+
+`services/types.ts` is hand-written, not generated. `backend/scripts/check_contract_sync.py`
+compares it against the live OpenAPI schema and fails on drift.
+
+## Conventions worth knowing
+
+**`components/ui/` is vendored.** Those files come from the shadcn registry and
+are regenerated by `npx shadcn@latest add`. Do not hand-edit them. ESLint's
+`react-refresh/only-export-components` rule is scoped off for that directory
+because the registry deliberately exports a `*Variants` object beside each
+component; every file we actually author still has the rule on.
+
+**No `tailwind.config.js`.** Tailwind v4 is configured in `src/index.css` via
+`@theme inline`. A colour token declared in `:root` with no matching
+`@theme inline` line generates no utility class — that is the usual reason a
+new colour "doesn't work".
+
+**`--color-primary` belongs to shadcn.** The brand fill is `--color-brand`.
+Naming a token after a font-size step is also forbidden; it collides with the
+type scale.
+
+**No yellow.** Edit actions use `#ACA5FF`, keyword highlights `#D1CDFF`.
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| Requests 404 in the browser but work in curl | Dev server not running, so nothing is proxying `/api` |
+| CORS error | You set `VITE_API_BASE_URL`. Leave it empty and let the proxy handle it — the backend only allows `localhost:5173` |
+| Env change has no effect | Vite reads env files at startup. Restart `npm run dev` |
+| `npx tsc` installs a strange package | There is a squatted `tsc` on npm. Use `./node_modules/.bin/tsc --noEmit -p tsconfig.app.json` |
+| Build exits 137 | Out of memory — the dev server is still running. Stop it first |
+| A verifier fails | Check the assertion against `backend/app/schemas.py` before changing app code. A failing probe is often the probe's own bug |

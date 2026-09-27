@@ -3,6 +3,7 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.services.resume_ops import migrate
 from app.models import JobDescription, Resume, ResumeVersion, Template, User
 
 USERS = [
@@ -13,12 +14,143 @@ USERS = [
     ("Lena Fischer", "lena@example.com", "Frontend Engineer", "#7c3aed"),
 ]
 
+# Templates: (key, name, description, design_tokens)
+#
+# design_tokens is the CONTRACT the renderers read. It used to be {} for every
+# template, which meant "pick a template" could not change anything -- the
+# frontend had to hardcode its own per-key styling and the PDF ignored the
+# choice entirely. Putting the values here makes one definition drive the live
+# preview, the PDF and any future renderer.
+#
+# Token meanings:
+#   font        "sans" | "serif"                 body typeface family
+#   heading     "rule" | "underline" | "plain" | "boxed" | "sidebar"
+#               how a section heading is separated from its content
+#   name_align  "left" | "center"                header block alignment
+#   accent      hex, or "" to inherit the neutral ink colour
+#   density     "airy" | "normal" | "dense"      vertical rhythm multiplier
+#   caps        bool                             UPPERCASE section headings
+#   divider     bool                             rule under the contact line
 TEMPLATES = [
-    ("modern", "Modern", "Clean sans-serif with accent rules."),
-    ("classic", "Classic", "Traditional serif, conservative spacing."),
-    ("compact", "Compact", "Dense layout that fits more on one page."),
-    ("executive", "Executive", "Generous whitespace, senior-leaning."),
-    ("minimal", "Minimal", "No ornament, maximum readability."),
+    (
+        "modern",
+        "Modern",
+        "Accent rules and a clean left-aligned header.",
+        {
+            "font": "sans",
+            "heading": "rule",
+            "name_align": "left",
+            "accent": "#4737ff",
+            "density": "normal",
+            "caps": True,
+            "divider": False,
+            "header": "stacked",
+            "entry": "stacked",
+            "skill_columns": 2,
+        },
+    ),
+    (
+        "executive",
+        "Executive",
+        "Serif with a split header and warm copper accents.",
+        {
+            "font": "serif",
+            "heading": "rule",
+            "name_align": "left",
+            "accent": "#A2643C",
+            "density": "normal",
+            "caps": True,
+            "divider": True,
+            "header": "split",
+            "entry": "stacked",
+            "skill_columns": 3,
+        },
+    ),
+    (
+        "balanced",
+        "Balanced",
+        "Centred header with muted green section titles.",
+        {
+            "font": "sans",
+            "heading": "plain",
+            "name_align": "center",
+            "accent": "#5F8A7D",
+            "density": "normal",
+            "caps": False,
+            "divider": False,
+            "header": "stacked",
+            "entry": "stacked",
+            "skill_columns": 1,
+        },
+    ),
+    (
+        "classic",
+        "Classic",
+        "Traditional serif, centred and understated.",
+        {
+            "font": "serif",
+            "heading": "underline",
+            "name_align": "center",
+            "accent": "",
+            "density": "normal",
+            "caps": True,
+            "divider": True,
+            "header": "stacked",
+            "entry": "stacked",
+            "skill_columns": 1,
+        },
+    ),
+    (
+        "minimal",
+        "Minimal",
+        "Airy monochrome layout with generous whitespace.",
+        {
+            "font": "sans",
+            "heading": "rule",
+            "name_align": "center",
+            "accent": "",
+            "density": "airy",
+            "caps": True,
+            "divider": False,
+            "header": "stacked",
+            "entry": "stacked",
+            "skill_columns": 2,
+        },
+    ),
+    (
+        "compact",
+        "Compact",
+        "Dense single-page layout with three-column skills.",
+        {
+            "font": "sans",
+            "heading": "plain",
+            "name_align": "left",
+            "accent": "",
+            "density": "dense",
+            "caps": True,
+            "divider": True,
+            "header": "split",
+            "entry": "inline",
+            "skill_columns": 3,
+        },
+    ),
+    (
+        "technical",
+        "Technical",
+        "Bar-led headings and tight spacing for engineering roles.",
+        {
+            "font": "sans",
+            "heading": "sidebar",
+            "name_align": "left",
+            "accent": "#3529bf",
+            "density": "dense",
+            "caps": False,
+            "divider": False,
+            "header": "stacked",
+            "entry": "inline",
+            "skill_columns": 3,
+        },
+    ),
 ]
 
 SAMPLE_JD = """Senior Site Reliability Engineer
@@ -41,6 +173,7 @@ Requirements:
 DEMO_RESUME = {
     "contact": {
         "name": "Priya Sharma",
+        "headline": "Site Reliability Engineer",
         "email": "priya@example.com",
         "phone": "+91 98765 43210",
         "location": "Pune, India",
@@ -57,7 +190,10 @@ DEMO_RESUME = {
         {
             "company": "Acme Corp",
             "role": "Senior SRE",
-            "dates": "2021 - Present",
+            "location": "Pune, India",
+            "start_date": "Mar 2021",
+            "end_date": "",
+            "current": True,
             "bullets": [
                 "Led migration of 40 services to Kubernetes, cutting deploy time by 65%",
                 "Built Terraform modules adopted by 8 engineering teams",
@@ -67,7 +203,10 @@ DEMO_RESUME = {
         {
             "company": "Globex",
             "role": "Infrastructure Engineer",
-            "dates": "2019 - 2021",
+            "location": "Bengaluru, India",
+            "start_date": "Jul 2019",
+            "end_date": "Feb 2021",
+            "current": False,
             "bullets": [
                 "Automated PostgreSQL failover, improving recovery time to under 2 minutes",
                 "Introduced CI pipelines that cut build times from 22 to 7 minutes",
@@ -81,7 +220,16 @@ DEMO_RESUME = {
         }
     ],
     "education": [
-        {"school": "COEP Pune", "degree": "B.Tech Computer Engineering", "dates": "2015 - 2019"}
+        {
+            "school": "COEP Pune",
+            "degree": "B.Tech Computer Engineering",
+            "field_of_study": "Computer Engineering",
+            "location": "Pune, India",
+            "grade": "First Class with Distinction",
+            "start_date": "2015",
+            "end_date": "2019",
+            "current": False,
+        }
     ],
     "skills": [
         {"label": "Platform", "items": ["Kubernetes", "Docker", "Terraform", "AWS"]},
@@ -100,10 +248,23 @@ def seed(db: Session) -> dict:
         "vector_docs": 0,
     }
 
-    for key, name, description in TEMPLATES:
-        if db.scalar(select(Template).where(Template.key == key)) is None:
-            db.add(Template(key=key, name=name, description=description, design_tokens={}))
+    # Templates are PRESENTATION, not user data: nothing the user typed lives
+    # here, so unlike users and resumes these rows are safe to update in place.
+    # Insert-only would strand every existing database on the old empty
+    # design_tokens and a "new template" would never appear after first boot.
+    for key, name, description, tokens in TEMPLATES:
+        existing = db.scalar(select(Template).where(Template.key == key))
+        if existing is None:
+            db.add(
+                Template(key=key, name=name, description=description, design_tokens=tokens)
+            )
             created["templates"] += 1
+        else:
+            # Refresh in place. `created` still counts inserts only, so the
+            # idempotency test ("second seed creates nothing") holds.
+            existing.name = name
+            existing.description = description
+            existing.design_tokens = tokens
     db.flush()
 
     users: list[User] = []
@@ -135,7 +296,9 @@ def seed(db: Session) -> dict:
         resume = Resume(
             user_id=priya.id,
             title="Priya Sharma — SRE",
-            structured_data=DEMO_RESUME,
+            # migrate() fills the derived `dates` mirror, so seeded data is
+            # byte-identical in shape to anything the editor writes.
+            structured_data=migrate(DEMO_RESUME),
             parse_status="ready",
             template_key="modern",
             version_cursor=1,

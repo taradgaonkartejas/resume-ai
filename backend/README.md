@@ -1,7 +1,7 @@
 # ResumeAI Backend
 
 FastAPI + SQLAlchemy 2.0, three layers: **controller → service → repository**.
-24 endpoints, 57 tests passing, ruff clean.
+28 operations, 152 tests passing, ruff clean.
 
 ## Quick start
 
@@ -17,6 +17,7 @@ on its own, so you never have to.
 ```bash
 cd backend
 conda env create -f environment.yaml && conda activate resume-ai
+make env-file                 # backend/.env from .env.example
 make up                       # docker compose up -d, waits for the db
 make db-push-seed             # tables + demo data
 make run                      # API on :8000
@@ -27,6 +28,7 @@ make run                      # API on :8000
 ```powershell
 cd backend
 conda env create -f environment.yaml ; conda activate resume-ai
+.\make.ps1 env-file            # backend\.env from .env.example
 .\make.ps1 up                  # docker compose up -d, waits for the db
 .\make.ps1 db-push-seed        # tables + demo data
 .\make.ps1 run                 # API on :8000
@@ -59,7 +61,7 @@ Docs at http://localhost:8000/docs · health at `/api/health`.
 | `redis` | 6379 | cache |
 | `redis-insight` | 5540 | Redis web UI |
 
-Credentials come from `docker-compose.yml` and must match `.env`:
+Credentials come from `docker-compose.yml` and must match `backend/.env`:
 Postgres `admin` / `Admin123` / db `resumeai`; MinIO `minio` / `minio123`.
 
 Useful checks:
@@ -75,7 +77,7 @@ docker compose down -v            # stop AND delete all data
 Two things that trip people up:
 
 - **Postgres is on host port 5433**, not 5432, so it never collides with a
-  local install. `.env` already points at 5433.
+  local install. `backend/.env` already points at 5433.
 - **`minio-init` is supposed to exit.** It creates `resumeai-uploads` and
   `resumeai-exports`, prints `buckets ready`, and stops. `docker compose ps`
   showing it as `Exited (0)` is success, not a failure.
@@ -94,6 +96,65 @@ code when `minio-init` completes normally, even though the whole stack is
 healthy. Naming `db` sidesteps that.
 
 ### 1. Environment
+
+Two different things are called "environment" here, and they are separate
+files: `environment.yaml` pins **packages**, `.env` holds **settings**.
+
+#### `backend/.env` — settings and secrets
+
+```bash
+make env-file            # Windows: .\make.ps1 env-file
+```
+
+Copies `.env.example` to `.env` if it does not already exist. It will **never**
+overwrite an existing file — that file holds the only copy of your API key.
+
+`.env` lives in `backend/`, not the repo root. The backend owns its own
+configuration so the browser app can own `frontend/.env.local` without the two
+fighting over one file:
+
+| | `backend/.env` | `frontend/.env.local` |
+|---|---|---|
+| Read by | the FastAPI process | Vite, at build time |
+| Visible to the browser | no | **yes, always** |
+| Safe for secrets | yes | **no** |
+| Holds | `UNOROUTER_API_KEY`, `DATABASE_URL`, MinIO keys | `VITE_API_BASE_URL`, `VITE_API_TIMEOUT_MS` |
+
+`app/config.py` resolves it as `BACKEND_DIR / ".env"` — an absolute path
+derived from `__file__`. That matters more than it looks: pydantic-settings
+resolves a *relative* `env_file` against the current working directory, so a
+bare `".env"` would load when uvicorn starts in `backend/` and silently not
+load from anywhere else. There is no error when an env file is missing; every
+setting just falls back to its default. You would get `llm_configured: false`
+with a valid key sitting in the file, and SQLite instead of Postgres.
+
+Anchoring on `__file__` means the working directory is irrelevant:
+
+```bash
+cd backend && python -m uvicorn app.main:app     # loads it
+cd .. && python -m uvicorn app.main:app          # also loads it
+```
+
+`docker-compose.yml` is unaffected by the move — it hardcodes every value and
+performs no `${VAR}` interpolation, so it never read the root `.env` in the
+first place.
+
+Two more things worth knowing:
+
+- **The shell beats the file.** `DATABASE_URL=... make run` overrides `.env`,
+  which is how the test suite and CI inject settings.
+- **`extra="ignore"`** lets `.env` carry keys the `Settings` model does not
+  declare. Without it, one unrecognised line raises `ValidationError` at
+  startup.
+
+Check what actually loaded:
+
+```bash
+python doctor.py         # make doctor
+curl localhost:8000/api/health
+```
+
+#### `environment.yaml` — packages
 
 `environment.yaml` lives in `backend/` and is the **single source of truth**
 for dependencies. Run these from `backend/`:
@@ -146,7 +207,7 @@ will report `"storage":"disk"`. That is a supported mode; uploads and exports
 go to `../data/<bucket>/` instead.
 </details>
 
-The app does **not** fall back to SQLite — `.env` sets
+The app does **not** fall back to SQLite — `backend/.env` sets
 `ALLOW_SQLITE_FALLBACK=false`, so an unreachable Postgres is a hard startup
 error rather than a silent downgrade that has you debugging the wrong
 database. Object storage *does* still fall back to disk
@@ -183,7 +244,7 @@ something looks wrong:
 | `database` | `postgresql` | startup fails instead of falling back |
 | `pgvector` | `true` | `false` → vector search uses slow Python cosine |
 | `storage` | `minio` | `disk` → MinIO unreachable, using `../data/<bucket>/` |
-| `llm_configured` | `false` | `true` once `UNOROUTER_API_KEY` is set in `.env` |
+| `llm_configured` | `false` | `true` once `UNOROUTER_API_KEY` is set in `backend/.env` |
 | `users` | `5` | `0` → not seeded yet; `-1` → query failed |
 
 `llm_configured: false` is normal and fully supported: every agent falls back
@@ -195,13 +256,16 @@ to its deterministic path, which is why all 57 tests pass without an API key.
 backend/
 ├── Makefile           short aliases for everything below (Linux/macOS)
 ├── make.ps1           the same targets for Windows PowerShell
+├── .env               real settings and secrets (git-ignored)
+├── .env.example       committed template; `make env-file` copies it
 ├── environment.yaml   conda env spec — the dependency source of truth
+├── doctor.py          environment diagnostics (stdlib only)
 ├── alembic.ini        generated on first `make migrate`
 ├── migrations/        Alembic env + versions/
 └── app/
     ├── cli.py         db push/status/reset + migrate dev/deploy/down
     ├── dbinit.py      schema create/verify/DDL helpers used by the CLI
-    ├── config.py      settings; .env anchored to the repo root
+    ├── config.py      settings; .env anchored to backend/ via BACKEND_DIR
     ├── db.py          engine, pgvector detection, FK pragma, DATA_DIR
     ├── identity.py    X-User-Id -> ?user_id= -> first seeded user
     ├── models.py      11 tables — the schema; JSONB/Vector SQLite variants
@@ -258,7 +322,7 @@ Postgres + pgvector — **16** via `docker-compose.yml`
 version-specific; the schema builds identically on both.
 
 The app refuses to start if it cannot reach Postgres
-(`ALLOW_SQLITE_FALLBACK=false` in `.env`) — a silent downgrade to SQLite is how
+(`ALLOW_SQLITE_FALLBACK=false` in `backend/.env`) — a silent downgrade to SQLite is how
 you end up debugging the wrong database.
 
 ```bash
@@ -353,8 +417,14 @@ on Linux/macOS (`apt-get install postgresql postgresql-17-pgvector`, `initdb`
 into `~/pgdata`, port 5433, then creates the `resumeai` database).
 
 `init_db()` runs `CREATE EXTENSION IF NOT EXISTS vector` then `create_all`, so
-the schema is applied on first boot. `../schema.sql` is the generated DDL, kept
-for review; `app/models.py` remains the source of truth.
+the schema is applied on first boot. `app/models.py` is the source of truth.
+
+`../schema.sql` is **generated output, and nothing reads it.** It is not an
+init script — the schema reaches the database through `create_all()` and
+Alembic, never by running that file. It exists so the shape of the database is
+reviewable in a diff without a running server, which is also why `make db-sql`
+works while Postgres is down. Regenerate it after any model change; it is safe
+to delete if you do not want it.
 
 **15 tables:** 11 application tables (`users`, `templates`, `resumes`,
 `resume_versions`, `analysis_reports`, `job_descriptions`, `tailoring_sessions`,
@@ -385,6 +455,69 @@ possible even in principle.
 
 ## Troubleshooting
 
+**`ModuleNotFoundError` for a package `conda list` says is installed**
+
+The prompt reads `(resume-ai)` but `python` is resolving to a different
+interpreter — usually base Anaconda, when the installer added it to the system
+PATH. Packages installed into the env are then invisible.
+
+The giveaway is in the traceback: every frame sits under the *base* prefix
+rather than the env.
+
+```
+File "C:\ProgramData\anaconda3\Lib\site-packages\uvicorn\...
+                ^^^^^^^^^^^^^^^^^^^ base, not C:\Users\<you>\.conda\envs\resume-ai
+```
+
+Confirm it:
+
+```powershell
+.\make.ps1 which-python      # make which-python
+python doctor.py              # flags the mismatch explicitly
+```
+
+If `prefix` and `CONDA_PREFIX` disagree, that is the bug. **Do not reinstall
+anything** — the packages are fine, the interpreter is wrong.
+
+The task runners now prefer `$CONDA_PREFIX` over PATH, so `make` / `make.ps1`
+targets pick the right interpreter on their own. To fix your shell generally:
+
+```powershell
+conda init powershell          # then open a NEW terminal
+conda activate resume-ai
+```
+
+Or bypass the shell entirely:
+
+```powershell
+conda run -n resume-ai --no-capture-output python -m uvicorn app.main:app --reload
+```
+
+Note that `conda activate` inside a script does not affect the parent shell,
+and on Windows PowerShell it is a no-op unless `conda init powershell` has been
+run at least once.
+
+**Settings are all at their defaults and there is no error**
+
+A missing or unfound `.env` is silent by design — every field falls back to its
+default and the app boots happily. Symptoms: `llm_configured: false` with a key
+in the file, or SQLite when you expected Postgres.
+
+Check that the file is where the code looks for it:
+
+```bash
+cd backend
+ls -l .env                      # must be HERE, not in the repo root
+python doctor.py
+```
+
+If you have just pulled a change that moved `.env` into `backend/`, a stale
+copy at the repo root is now ignored. Move it:
+
+```bash
+mv ../.env .env                 # Windows: move ..\.env .env
+```
+
 **`The term '.\make.ps1' is not recognized` (PowerShell)**
 
 You are in the repo root; the script is one level down. Change into the
@@ -410,6 +543,74 @@ target silently ran `Clear-Item` on its first argument instead. The function is
 now `Invoke-Cli`. Pull the current `make.ps1`, or use the CLI directly:
 `python -m app.cli db push --seed`.
 
+**`ModuleNotFoundError: No module named 'pydantic_core._pydantic_core'`**
+
+A broken install, not a code problem. `pydantic_core` ships a compiled
+extension (`.pyd` on Windows); Python found the Python package but not its
+native module. Usually a half-finished install, an interrupted download, or a
+cached wheel built for a different Python version. Reinstall both halves
+together — the versions are tightly coupled:
+
+```powershell
+pip install --force-reinstall --no-cache-dir pydantic==2.13.5 pydantic-core==2.46.5
+python -c "import pydantic; print(pydantic.VERSION)"
+```
+
+`--no-cache-dir` matters: without it pip reuses the same bad wheel. If it
+still fails, the environment itself is suspect — rebuild it:
+`conda env remove -n resume-ai` then `conda env create -f environment.yaml`.
+
+Do not pin `pydantic-core` in `environment.yaml`. It is resolved by `pydantic`
+and pinning both invites a conflict on the next upgrade.
+
+**Anything failing before the app starts — run the doctor first**
+
+```powershell
+.\make.ps1 doctor          # or: python doctor.py
+```
+
+It checks the interpreter, every compiled extension (the usual culprit), the
+pure-Python imports, how `DATABASE_URL` actually parses, and whether anything
+is listening on the port — then prints the exact fix for whatever is broken.
+It uses only the standard library, so it still runs when pydantic or psycopg2
+are the things that are broken.
+
+**`No module named 'psycopg2._psycopg'`**
+
+Same class of problem as the `pydantic_core` entry above: `psycopg2-binary`
+ships a compiled extension and this one is missing. It is *not* a connectivity
+failure, despite the "Cannot reach the server" wrapper:
+
+```powershell
+pip install --force-reinstall --no-cache-dir psycopg2-binary==2.9.13
+python -c "import psycopg2; print(psycopg2.__version__)"
+```
+
+Never install plain `psycopg2` (no `-binary`) here — it compiles from source
+and needs a C toolchain plus libpq headers.
+
+**`Cannot reach the server at <something>@localhost:5433`**
+
+If the host in that message contains an `@`, the DSN was mis-parsed, not the
+server unreachable. An unencoded `@` in the password splits
+`DATABASE_URL` at the wrong place — the parser takes the *last* `@` as the
+delimiter, so the password tail becomes part of the hostname:
+
+```
+postgresql+psycopg2://admin:Admin@123@localhost:5433/resumeai
+                                ^ password ends here; host = "123@localhost"
+```
+
+Percent-encode it as `%40`:
+
+```
+postgresql+psycopg2://admin:Admin%40123@localhost:5433/resumeai
+```
+
+The password in `backend/.env` must also match `POSTGRES_PASSWORD` in
+`docker-compose.yml` — which is `Admin123`, with no `@` at all. If your DSN has
+one, that is the more likely mistake.
+
 **`connection refused` on port 5433 / `db-push` fails**
 
 Postgres is not up yet, or not up at all. `docker compose up -d` returns as
@@ -429,11 +630,11 @@ error rather than a confusing empty database.
 
 Something else holds the port. Either stop it, or change the *host* side of
 the mapping in `docker-compose.yml` (`"5434:5432"`) and update `DATABASE_URL`
-in `.env` to match. Only the left number is yours to change.
+in `backend/.env` to match. Only the left number is yours to change.
 
 **`password authentication failed for user "admin"`**
 
-`.env` and `docker-compose.yml` disagree. They must match exactly:
+`backend/.env` and `docker-compose.yml` disagree. They must match exactly:
 `admin` / `Admin123` / `resumeai`. If you edited the Postgres credentials after
 the first `up`, the old password is baked into the `pgdata` volume — recreate
 it with `docker compose down -v` (this deletes all data).

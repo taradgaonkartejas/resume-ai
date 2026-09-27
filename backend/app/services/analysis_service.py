@@ -7,7 +7,7 @@ from app.repositories.analysis_repository import AnalysisRepository
 from app.repositories.resume_repository import ResumeRepository
 from app.repositories.vector_repository import VectorRepository
 from app.services.exceptions import NotFoundError, ResumeNotFound
-from app.services.heuristics import infer_role_tags, score_resume
+from app.services.heuristics import build_steps, infer_role_tags, score_resume
 
 logger = logging.getLogger(__name__)
 
@@ -117,3 +117,25 @@ class AnalysisService:
         if report is None:
             raise NotFoundError("No analysis yet — POST /analyze first")
         return report
+
+    def steps(self, resume_id: uuid.UUID, user_id: uuid.UUID) -> dict:
+        """The guided editor's step list, scored against the CURRENT resume.
+
+        Deliberately not read from the stored AnalysisReport. The editor mutates
+        structured_data on every keystroke (debounced autosave), so a cached
+        report is stale the moment the user fixes anything — and a stale
+        "+3 points" card that never disappears is exactly the bug that makes
+        the score feel fake. Scoring is pure and cheap, so recompute.
+        """
+        resume = self._owned(resume_id, user_id)
+        data = resume.structured_data or {}
+        scored = score_resume(data)
+        steps = build_steps(data, scored)
+        return {
+            "resume_id": resume.id,
+            "overall_score": scored["overall_score"],
+            "max_score": sum(s["max"] for s in steps),
+            # Total honest headroom the guided flow can still recover.
+            "points_available": sum(s["points_available"] for s in steps),
+            "steps": steps,
+        }

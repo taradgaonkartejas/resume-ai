@@ -1,6 +1,9 @@
 -- ResumeAI schema (PostgreSQL 16 + pgvector)
 -- Generated from app/models.py by `python -m app.dbinit --sql`.
--- The ORM is the source of truth; init_db() applies this automatically.
+-- app/models.py is the source of truth. Nothing reads this file: the
+-- schema is applied by create_all()/Alembic, not by running this SQL.
+-- It exists for review, diffing and psql inspection. Regenerate with
+-- `make db-sql` after any model change.
 
 CREATE EXTENSION IF NOT EXISTS vector;
 

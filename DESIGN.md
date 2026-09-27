@@ -57,12 +57,14 @@ A persistent AI chat sits alongside the editor for open-ended help, and the resu
 
 ```mermaid
 flowchart TD
-    A[Select User - no auth] --> B[Upload Resume - PDF/DOCX/TXT]
+    A[Select User - no auth] --> A2[My Resumes library]
+    A2 --> B[Upload Resume - PDF/DOCX/TXT]
     B --> B2[Store in MinIO - user-prefixed key]
     B2 --> C[Extraction Agent: raw text to structured JSON]
     C --> C2[Index bullets - scoped to user + resume]
-    C2 --> D[Select Resume Template]
+    C2 --> D[STEP: Select Resume Template - full screen]
     D --> E{Choose Mode}
+    A2 --> E
 
     E -->|Resume Analysis| F[Analysis Graph]
     F --> F1[Retrieve ATS rules - RAG]
@@ -71,7 +73,8 @@ flowchart TD
     F3 --> G[Overall Score + 4 Category Breakdown]
     G --> H[Drill into a category for specific fixes]
 
-    E -->|Tailor Resume| I[Paste Job Description]
+    E -->|Tailor Resume| I0[FORK resume - copy data, template and vectors]
+    I0 --> I[Paste Job Description]
     I --> J[JD Analyst Agent + taxonomy RAG]
     J --> J2[Diff keywords vs resume]
     J2 --> K1[Retrieve grounding bullets - user + resume scoped]
@@ -87,7 +90,8 @@ flowchart TD
     H --> P[Chat Assistant - open-ended edits]
     M --> P
     P --> Q[Live resume preview updates]
-    Q --> R{Download Resume}
+    Q --> Q2[Saved as its own card in My Resumes]
+    Q2 --> R{Download Resume}
     R -->|PDF| S1[Styled, template-matched PDF]
     R -->|DOCX| S2[Editable Word file]
     R -->|Plain Text| S3[ATS-safe .txt for online forms]
@@ -100,37 +104,188 @@ flowchart TD
 ### 4.1 User Switcher (top bar)
 One dropdown, five seeded users. Switching re-scopes every panel — resume list, analysis, tailoring sessions, chat history. The active user is sent as `X-User-Id` on every request. This replaces a login screen.
 
-### 4.2 Import Resume (modal)
+### 4.1.1 Theme toggle (top bar)
+A sun/moon button beside the user switcher, present on every screen (library, template step, workspace).
+
+- **Stored per user, not per browser.** Five demo personas share one machine, so a single global key would mean switching user silently rewrote someone else's preference. The key is `resumeai.theme.{user_id}`.
+- A user who has never chosen inherits the `anonymous` slot, so a theme picked before a user is resolved is not thrown away on first switch.
+- **Dark is the product default**; an unreadable or missing stored value falls back to it rather than throwing.
+- The class is applied by an inline script in `index.html` that runs **before the bundle**, because setting it from React paints one dark frame first and reads as a flicker. That script duplicates the storage-key format on purpose — it cannot import — so the two must be changed together.
+- The button shows the theme you would *get* (a sun while dark), with an `aria-label` that says so in words.
+- Light-theme pairs were checked against WCAG AA; note the brand inversion trap in `index.css` §3 — `#4737FF` is unusable as text on dark and `--brand-400` is unusable on light, so the same role takes opposite values per theme.
+
+### 4.2 My Resumes (home)
+- Landing screen. Every resume — base or tailored — is a card.
+- Tabs **All / Base / Tailored** with counts, plus title/role search.
+- Each card: live thumbnail of the real content, inline rename, `Tailored: <role at company>` subtitle, relative "last updated", strength ring, a primary action (**Tailor to a job** / **Continue Tailoring**) and an overflow menu (Duplicate, Open editor, Delete).
+- Strength bands are **<60 Needs work · 60–79 Good · 80+ Strong**. A resume that has never been analysed shows `–` and "Not analysed yet", **not 0%** — zero would read as a terrible resume rather than an unmeasured one.
+- Analysis is never run automatically; the score appears once the user runs it from the editor.
+
+### 4.2.1 Resume forking
+Tailoring **forks** the resume rather than editing it in place, which is what lets one base serve many applications while staying pristine.
+
+| Copied | Not copied |
+|---|---|
+| `structured_data`, `template_key`, `raw_text`, `storage_key` | versions, analyses (a fork starts its own history) |
+| **grounding vectors** | |
+
+The vector copy is load-bearing, not an optimisation: the writer agent retrieves grounding bullets scoped to `resume_id`, so an unindexed fork would silently produce weaker, ungrounded suggestions with no error anywhere.
+
+Columns on `resumes`: `kind` (`base` \| `tailored`), `parent_id` (nullable self-FK), `tailored_for` (denormalised JD label for the card subtitle).
+
+**Deleting a base orphans its forks rather than cascading** — deleting your base must never silently delete the tailored versions already sent to employers. Orphaning is done explicitly in the service, not via `ON DELETE SET NULL`, because SQLite does not enforce FK actions unless `PRAGMA foreign_keys` is on and the behaviour must not differ between backends.
+
+A fork shares its parent's `storage_key`, so deletion only removes the uploaded object when **no other resume references it**.
+
+### 4.3 Import Resume (modal)
 - Fields: Resume Name, drag-and-drop upload (PDF/DOCX/TXT), live preview pane.
 - On upload: validate type and size → store in MinIO under `{user_id}/{resume_id}/{filename}` → trigger async parse → spinner → editor once parsed.
 - Parsing reads the file back *out of object storage*, so the pipeline is identical whether storage is MinIO or real S3.
 
-### 4.3 Template Selection (modal)
-- Grid of templates, each rendered with the user's *actual* parsed content once parsing completes, so the choice is realistic.
+### 4.4 Template Selection (step)
+- A **forced full-screen step** immediately after upload and extraction — not a modal. After extraction the user has never seen their resume rendered, so this is the first moment the parse becomes visible and it doubles as a "did we read your file correctly?" check. A quiet warning appears when extraction looks thin (no experience entries, or a missing name/email).
+- The same grid is reachable later from the workspace as a modal to change template; both render one shared `TemplateGrid`, so they cannot drift.
+- Grid of **7 templates**, each rendered with the user's *actual* parsed content once parsing completes, so the choice is realistic.
+- Each card shows the template name, its description, a scaled full-page live preview, and a footer summarising the typeface, density and header style.
 - Non-destructive: content is decoupled from layout, so switching never loses data.
 
-### 4.4 Main Workspace (3-pane)
-- **Left** — tabs: "Resume Analysis" / "Tailor Resume".
-- **Center** — AI chat with quick-action chips, message history, token counter.
-- **Right** — live rendered resume, zoom, undo/redo, "Templates & Settings", **Download**.
+#### Design-token contract
+Styling lives in `templates.design_tokens` (JSONB), defined once in `seed.py` and read by **both** renderers — the live HTML preview and the fpdf2 exporter. Adding or restyling a template is therefore a **backend-only change**; no frontend edit is required, and the preview cannot drift from the downloaded file.
 
-### 4.5 Resume Analysis tab
-- Score ring (0–100) plus role/level tags, e.g. "software engineering", "junior · 2 yrs".
-- Four category cards with improvement-count badges, expanding on click.
-- Findings carry a `target_ref`, so clicking one highlights the offending bullet in the live preview — possible because deterministic rules know which bullet they inspected (§6.6).
+| Token | Values | Effect |
+|---|---|---|
+| `font` | `sans` \| `serif` | Helvetica or Times (fpdf2 core fonts — no font files ship) |
+| `heading` | `rule` \| `underline` \| `plain` \| `boxed` \| `sidebar` | Section-heading treatment; `rule` tints its line with the accent |
+| `name_align` | `left` \| `center` | Header alignment |
+| `accent` | hex or `""` | Name and heading colour; `""` inherits ink |
+| `density` | `airy` \| `normal` \| `dense` | Line height and heading gap |
+| `caps` | bool | Uppercase section headings |
+| `divider` | bool | Rule under the contact block |
+| `header` | `stacked` \| `split` | Name above contact, or name left / contact flush right |
+| `entry` | `stacked` \| `inline` | Role above company, or `Role - Company` on one line |
+| `skill_columns` | 1–3 | Skills laid out as a column grid |
 
-### 4.6 Tailor Resume tab
-- Keyword match % + "X of Y keywords integrated" + segmented progress bar.
-- Tabs: **Active** (pending) / **Already Matched** (keywords the resume already had) / **Rejected**.
-- Each card: keywords modified, placement (company/role), Original Bullet, Modified Bullet with the keyword highlighted, Reasoning, and **Reject / Accept Revision / Edit**.
-- Cards show a **grounding badge** from the critic. Revised suggestions display the critic's note. Suggestions the critic rejected never render.
+A `split` header requires `name_align: left` — centring the name while floating contact right would collide. This is asserted in the test suite.
 
-### 4.7 Download Resume
+| Template | Font | Header | Entry | Cols | Accent |
+|---|---|---|---|---|---|
+| Modern | sans | stacked | stacked | 2 | `#4737ff` |
+| Executive | serif | split | stacked | 3 | `#A2643C` |
+| Balanced | sans | stacked | stacked | 1 | `#5F8A7D` |
+| Classic | serif | stacked | stacked | 1 | — |
+| Minimal | sans | stacked | stacked | 2 | — |
+| Compact | sans | split | inline | 3 | — |
+| Technical | sans | stacked | inline | 3 | `#3529bf` |
+
+Dates are flushed to the right margin in every template — that is what makes a printed resume scannable by date. `contact.headline` (the professional title under the name) is optional and renders only when present; the parser extracts it from the line following the name, rejecting anything that looks like contact data or a section heading.
+
+**Export caching:** the object key is `{user_id}/{resume_id}/v{version_cursor}-{template_key}.{fmt}`. The template key is part of the cache identity because applying a template does *not* bump `version_cursor`; without it the bucket would serve the previously rendered PDF forever.
+
+**TXT is deliberately style-free** — it exists for ATS paste boxes, so the template must not affect it.
+
+### 4.5 Main Workspace
+- **Left** — tabs: "Resume Analysis" / "Tailor Resume". The active tab lives in the URL (`?tab=`), so "Continue Tailoring" is linkable and a refresh keeps your place.
+- **Center** — AI chat: message history, quick-action chips, inline suggestion cards. See §4.5.1.
+- **Right** — live rendered resume, zoom, "Templates & Settings", **Download**.
+
+Entry points set the tab deliberately: the card's strength ring opens **Analysis**, its primary button opens **Tailor**. Arriving on the wrong tab would make the button feel broken.
+
+#### 4.5.1 Chat assistant (centre pane)
+The centre column is a **fixed 380px**, not a flexible one: chat lines past roughly 70 characters are hard to scan, and the spare width is better spent on the resume preview, which is the pane that benefits from it.
+
+- Message history, user right / assistant left, with an empty state that states the review guarantee up front.
+- **Quick-action chips are rendered verbatim from the backend `quick_actions` strings.** The backend owns that copy so the list can change without a frontend release; the UI adds no icons and keeps no local fallback list.
+- **Chat never edits the resume directly.** A reply that proposes a change carries a `suggestion_id`, which renders as an inline Accept/Reject card and goes through the same review path as tailoring (`origin='chat'`, §5). This is what makes the assistant safe to trust: it cannot apply anything on its own, and it is prompt-bound never to claim it did.
+- The user's own message appears optimistically and rolls back if the POST fails — waiting on a multi-agent round trip before echoing typed text reads as a hang. The assistant reply is never faked.
+- **Message budget.** 25 per demo user (`users.chat_tokens_left`). The counter is hidden until 5 remain, then shows as a warning: a permanent counter makes a generous allowance feel like a meter running down. At zero the composer is **disabled with the reason shown**, because the backend returns 429 and letting the user type into a box that will reject them is worse than saying so.
+- Three panes need width; below ~1280px the preview collapses and the tools + chat remain, since those are the working surfaces and the preview is reference.
+
+### 4.6 Resume Analysis tab
+- Empty state with a single **Run analysis** button — analysis is never automatic (it costs a model call, and an unrequested score on upload reads as a judgement nobody asked for).
+- Once run: score ring, band label, **"N points to reach 80+"**, total finding count, role/level tags, and a re-run control.
+- Four category cards (contact 15 / summary 20 / experience 45 / format 20) with progress bars and finding-count badges, expanding on click to list the notes.
+- A 404 from `GET /resumes/{id}/analysis` is the **normal "never analysed" state**, not an error: the client treats it as an empty state and does not retry.
+
+**Clickable findings — resolved.** The rule engine now emits structured `Finding` objects rather than plain note strings, and each one carries a `target_ref` (§8 grammar) naming the exact field it judged. `category_scores[c].notes` is still emitted, derived from `[f.message]`, so existing clients keep working.
+
+```json
+{
+  "id": "experience.unquantified_bullets",
+  "category": "experience",
+  "target_ref": "exp_0.bullet_2",
+  "severity": "high",
+  "points": 7,
+  "message": "Only 3 of 8 bullets are quantified",
+  "fix_hint": "Add the number you moved: %, time saved, revenue, scale.",
+  "action": "rewrite",
+  "meta": { "quantified": 3, "total": 8 }
+}
+```
+
+### 4.6.1 Guided step editor
+
+A second mode of the Analysis tab (not a route, so the live preview stays mounted beside it and moves as the user types). The section list shows the four scoring categories; clicking one opens a focused step that pairs its recommendations with the editable fields they refer to.
+
+- **`GET /resumes/{id}/analysis/steps`** backs it. Unlike `GET /analysis` it is **computed live from the current `structured_data` on every call**, so it never 404s on "never analysed" — the guided flow is what produces the first score — and a resolved recommendation disappears within one autosave of the keystroke that fixed it. A cached report would leave "+3 points" cards sitting under a field the user already corrected.
+- **Autosave, no Save button** — debounced ~800 ms through `PUT /resumes/{id}/data`, flushed on step change and unmount so an arrow click cannot drop the last edit. Status is surfaced as Saving / Saved / Not saved rather than claimed silently.
+- **"Fix this"** scrolls to and focuses the field named by `target_ref`, which is the payoff for making findings addressable.
+
+**`+N points` is a contract, not decoration.** Each finding's `points` is computed as `max_achievable - awarded` for the single check that produced it, so resolving it raises `overall_score` by exactly N. This is enforced in three places: `backend/tests/test_findings.py` breaks a field, reads the promised number, fixes it and asserts the delta matches; `tests/test_steps_api.py` repeats the check end-to-end over HTTP; and `verify-api-surface.mjs` asserts it against the running server. A per-category assertion also guarantees findings never promise more than the category's remaining headroom. If that arithmetic ever stops holding, the badge should be removed rather than softened — a number the user can verify and catch being wrong costs more trust than showing none.
+
+**Increment scope.** The guided editor now edits contact, summary, experience (with structured dates and location), education (field of study, grade, dates) and skills. The additional sections — certifications, languages, references, awards, publications and custom sections — are approved but still pending, because each one costs both exporter renderers plus the preview, and a field the PDF silently drops is its own kind of lie.
+
+### 4.6.2 Structured dates
+
+`experience`, `education` and `projects` carry `start_date`, `end_date` and `current` instead of one free-text `dates` string. That is what makes tenure, gap detection, ordering and a real "Present" label possible.
+
+Two rules keep the migration honest:
+
+1. **Never guess.** `split_dates()` accepts only ranges it is sure of — a whitespace-padded separator (`Jan 2020 – Present`, `March 2018 to June 2021`) or the tight numeric form (`2019-2022`). Anything else (`Summer 2020`, `Jan-2020`, a bare `2020`) is preserved verbatim in `raw_dates` and rendered exactly as written. A resume that misstates employment dates is far worse than one showing an odd string, and the editor offers to convert it rather than doing so silently.
+2. **Never let display drift from data.** `resume_ops.date_label()` is the single accessor every renderer calls — both exporters, plain-text flattening and the scoring engine. The stored `dates` key is a derived mirror refreshed by `normalise_entry()` on every write, never an input once structured fields exist.
+
+`migrate()` runs on parse, on `PUT /resumes/{id}/data` and on seed, and is idempotent, so parsed, seeded and hand-edited documents are the same shape from the first byte.
+
+**The client implements the same rule twice, on purpose.** The preview renders the user's *unsaved* draft, so it cannot round-trip to the server for a label mid-keystroke; `src/lib/dates.ts` mirrors `date_label()`. Two copies of a rule drift, so `frontend/scripts/verify-date-parity.mjs` transpiles the real TypeScript module and compares it against the real backend across structured combinations, legacy migration and idempotence (33 checks, green against both the API and the mock).
+
+**"Currently work here"** disables the end-date input rather than hiding it, and deliberately does **not** clear the stored value — mis-clicking a switch is easy, and silently destroying a date the user typed is not recoverable. `date_label()` ignores `end_date` whenever `current` is true, so a retained value can never leak into the rendered resume.
+
+**PDF encoding.** The date split surfaced a latent export bug: `_latin1()` used `errors="replace"`, so the en-dash in a date range — and every curly quote, em-dash and ellipsis that Word and Google Docs autocorrect into pasted text — rendered as a literal `?`. It now transliterates to ASCII first and replaces only as a last resort. `tests/test_export_dates.py` renders all seven templates and asserts both that the dates appear and that no `?` survives.
+
+### 4.7 Tailor Resume tab
+- Empty state leads to the **job-description modal** (title + body, with a "Use sample JD" shortcut for demos).
+- Starting a tailoring run **forks** the resume (§4.2.1), so the UI navigates to the **child**, not the base. Staying on the base would show an unchanged resume and look like a failure.
+- Match % bar showing movement from the baseline, plus matched/gap keywords.
+- Tabs: **Active** / **Already Matched** / **Rejected**, each with counts.
+- Each card: keyword chips, placement (company · role), original text struck through, modified text with keywords highlighted, reasoning, critic notes, and **Accept / Reject / Edit**. Edit opens an inline textarea and accepts the user's own wording.
+- Keyword highlighting escapes regex metacharacters and matches longest-first, so `C++` and `Node.js` survive and `Node.js` is not shadowed by `Node`.
+- Cards show a **grounding badge** from the critic. Suggestions the critic rejected never render.
+
+### 4.8 Download Resume
 - **PDF** — default, template-styled; what most users submit.
 - **DOCX** — editable Word file for manual tweaks or employers who request it.
 - **TXT** — stripped of formatting, for ATS portals with "paste your resume" boxes.
 - All three generated on demand from the same structured JSON (§7) — one source of truth, three renderers.
 - Cached in the MinIO exports bucket keyed by **resume version**, so re-downloading an unchanged resume is a bucket read. Returns a presigned URL.
+
+---
+
+### 4.9 Routing
+
+Navigation lives in the URL, not in application state.
+
+| Route | Screen |
+|---|---|
+| `/` | redirect → `/resumes` |
+| `/resumes` | My Resumes (library) |
+| `/resumes/:id/template` | Template selection step |
+| `/resumes/:id?tab=analysis\|tailor` | Workspace |
+| `*` | redirect → `/resumes` |
+
+**This reverses an earlier decision.** The original call — a `view` field in the reducer, on the grounds that a local-only app has "no URLs worth sharing" — was made when there were three flat views and no nested state. Adding the chat pane gave the workspace both a resume id and a tab, at which point three things stopped being acceptable: refresh always dumped the user on the library, "Continue Tailoring" could not be linked or put in a bug report, and browser Back did nothing, which reads as broken. The "nothing worth sharing" reasoning was wrong specifically for tab state: `?tab=tailor` is exactly how a defect gets reproduced.
+
+What stays in the `AppState` reducer: `activeUserId`, `modal`, `zoom`, `theme`. **`activeUserId` is deliberately not in the URL** — it is identity, not a location, and a user id in a shareable link invites cross-user confusion in a 5-user demo. Switching user navigates home, because resume ids are per-user and the current `:resumeId` would 404.
+
+Tab changes use `replace`, so Back leaves the workspace rather than stepping through tabs. The template step also redirects with `replace`: the wizard is one-way, and Back should not return to a choice already made.
 
 ---
 
@@ -259,6 +414,7 @@ flowchart TB
 ```
 
 ### 6.1 Why this shape
+- **Templates are presentation, not user data.** Re-seeding updates template rows in place (users and resumes stay insert-only), so an existing database picks up restyled or newly added templates instead of being stranded on the old definitions.
 - **Structured data is the source of truth**, not the rendered PDF. Parsing converts unstructured text into JSON once; templates render over that JSON, so switching templates or applying AI edits never means re-parsing.
 - **AI orchestration is a separate layer** from API/CRUD, so prompts, retrieval and model routing evolve independently of the product API.
 - **Everything AI produces flows through the Suggestion object** before touching the resume. This is what makes Accept/Reject/Edit possible everywhere, including chat.
@@ -319,8 +475,8 @@ One OpenAI-compatible endpoint fronting 200+ models, which preserves multi-provi
 - **Base URL** `https://api.unorouter.com/v1` · **Primary** `gemini-3.5-flash-lite:free`
 - **Provider abstraction:** every agent calls `get_llm(task)`; the chat-model class is instantiated in exactly one file. Note the SDK takes `base_url` / `api_key` as field aliases.
 - **Fallback chain:** `with_fallbacks()` — `gemini-3.5-flash-lite:free` → `gemini-3.1-flash-lite` → `gpt-oss-120b:free`, on error, timeout or rate-limit.
-- **Cost/quality routing:** per-task config (`model_extract`, `model_rewrite`, `model_critic`, …), each defaulting to `model_default`. Upgrading bullet rewriting is one `.env` line.
-- **Key handling:** `UNOROUTER_API_KEY` from `.env` — never committed, never in the database. A real secrets manager is deferred (§12).
+- **Cost/quality routing:** per-task config (`model_extract`, `model_rewrite`, `model_critic`, …), each defaulting to `model_default`. Upgrading bullet rewriting is one `backend/.env` line.
+- **Key handling:** `UNOROUTER_API_KEY` from `backend/.env` — never committed, never in the database, and never reachable from the browser bundle (§14.1). A real secrets manager is deferred (§12).
 - **Usage limits:** per-user `chat_tokens_left`, decremented per call, surfaced as the "Chat tokens left" counter. Exhaustion returns HTTP 429.
 - **Graceful degradation:** with no API key the system still runs. A regex resume parser, deterministic keyword extraction and the rule-based scoring engine all work offline; only prose explanations and bullet rewriting go quiet.
 
@@ -357,6 +513,8 @@ Three reasons: **stability** — re-running analysis on an unchanged resume must
 | Summary | 20 | present, 40–70 words, no first person, no clichés, quantified |
 | Experience | 45 | quantification ratio, action-verb openers, passive openers, bullet length band, bullets per role, date sanity |
 | Format & Structure | 20 | skills section, education, total length, date-format consistency, duplicate bullets, parse confidence |
+
+Each check emits a `Finding` alongside its score, carrying the `points` that resolving it is worth — derived from the same arithmetic that awarded the score (`max_achievable - awarded`), never estimated separately. That is what lets the guided editor (§4.6.1) promise "+N points" and be right.
 
 ### 6.7 Tailor Resume — sequence
 
@@ -571,25 +729,42 @@ Two supporting notes. `tailoring_sessions.thread_id` links a database row to its
 
 The contract that makes surgical edits possible. `target_ref` strings address into it, so Accept patches one bullet rather than rewriting the document.
 
+Entries are addressed by **position**, not by a stored `id` — `exp_2.bullet_1` is the third experience entry's second bullet. Positional addressing keeps the document small and the patch logic trivial; the cost is that reordering invalidates outstanding refs, which is why a reorder and an open suggestion list are not allowed to overlap.
+
 ```jsonc
 {
-  "contact":  { "name": "", "title": "", "email": "", "phone": "",
-                "location": "", "links": [{ "label": "GitHub", "url": "" }] },
-  "summary":  { "text": "" },
+  "contact": {
+    "name": "", "headline": "", "email": "", "phone": "",
+    "location": "", "links": ["github.com/you"]        // plain strings
+  },
+  "summary": { "text": "" },
   "experience": [
-    { "id": "exp_1", "company": "", "role": "", "location": "",
-      "start": "2023-01", "end": "present",
-      "bullets": [{ "id": "exp_1.bullet_0", "text": "" }] }
+    {
+      "company": "", "role": "", "location": "",
+      "start_date": "Mar 2021",   // free text: "2019", "Jan 2020", "01/2020"
+      "end_date": "",             // ignored while `current` is true
+      "current": true,
+      "raw_dates": "",            // set ONLY when a legacy string was unsplittable
+      "dates": "Mar 2021 – Present",  // DERIVED mirror — never written by a client
+      "bullets": [""]             // plain strings
+    }
   ],
-  "education": [{ "id": "edu_1", "school": "", "degree": "", "start": "", "end": "" }],
-  "skills":   [{ "category": "Languages", "items": ["Python", "TypeScript"] }],
-  "projects": [{ "id": "prj_1", "name": "", "description": "", "bullets": [] }],
-  "certifications": [],
-  "_meta": { "needs_review": ["education"], "parse_confidence": 0.82 }
+  "education": [
+    { "school": "", "degree": "", "field_of_study": "", "location": "",
+      "grade": "", "start_date": "", "end_date": "", "current": false, "dates": "" }
+  ],
+  "projects": [
+    { "name": "", "role": "", "url": "", "tech": [],
+      "start_date": "", "end_date": "", "current": false, "dates": "",
+      "bullets": [] }
+  ],
+  "skills": [{ "label": "Languages", "items": ["Python", "TypeScript"] }]
 }
 ```
 
-`_meta.needs_review` implements "flag the section rather than guess" when parse confidence is low. Valid `target_ref` forms: `summary.text`, `exp_2.bullet_1`, `prj_1.bullet_0`, `skills.0.items`.
+Dates are free text rather than ISO, deliberately: resumes say "Summer 2020" and "Q3 2019", and forcing a date picker would either reject those or silently rewrite them. See §4.6.2 for the migration rules and the single `date_label()` accessor.
+
+Valid `target_ref` forms: `summary.text`, `exp_2.bullet_1`, `prj_1.bullet_0`, `skills.0.items`, plus the contact fields (`contact.email`, `contact.links`) that analysis findings address.
 
 ---
 
@@ -609,9 +784,13 @@ Every endpoint accepts `X-User-Id` (or `?user_id=` for curl convenience). Omitte
 | GET | `/api/resumes/{id}/parse-status` | Poll the parse job |
 | PUT | `/api/resumes/{id}/data` | Manual edit from the preview |
 | POST | `/api/resumes/{id}/template` | Apply or switch template |
+| POST | `/api/resumes` | Create a blank resume |
+| POST | `/api/resumes/{id}/fork` | Copy a resume (data, template, vectors) |
+| PATCH | `/api/resumes/{id}` | Rename |
 | DELETE | `/api/resumes/{id}` | Purge rows, vectors and objects |
 | POST | `/api/resumes/{id}/analyze` | Run the analysis graph |
-| GET | `/api/resumes/{id}/analysis` | Latest score + breakdown |
+| GET | `/api/resumes/{id}/analysis` | Latest score + breakdown (**404 = never analysed**) |
+| GET | `/api/resumes/{id}/analysis/steps` | Guided-editor steps + findings, recomputed live (**never 404s on "not analysed"**) |
 | POST | `/api/resumes/{id}/tailor` | Start tailoring; runs to the first interrupt |
 | GET | `/api/resumes/{id}/tailor` | List tailoring sessions |
 | GET | `/api/resumes/{id}/tailor/{sid}/suggestions` | Active / matched / rejected |
@@ -675,11 +854,12 @@ resumeai/
 ├── DESIGN.md
 ├── Makefile                      # single entry point for every task
 ├── docker-compose.yml            # Postgres+pgvector, Redis, MinIO, minio-init
-├── .env.example
 ├── .gitignore
 │
 ├── backend/                      # FastAPI + LangGraph
-│   ├── requirements.txt
+│   ├── .env                      # server settings + secrets (git-ignored)
+│   ├── .env.example              # committed template; `make env-file` copies it
+│   ├── environment.yaml          # conda env — dependency source of truth
 │   ├── pyproject.toml            # ruff + pytest config
 │   ├── app/
 │   │   ├── main.py               # routes, startup, CORS
@@ -713,29 +893,41 @@ resumeai/
 │       └── test_grounding.py     # acceptance gate 4
 │
 ├── frontend/                     # React + Vite + TypeScript
+│   ├── .env.local                # VITE_* only — inlined into the bundle
+│   ├── .env.example              # committed template
 │   ├── package.json
-│   ├── vite.config.ts            # proxies /api -> :8000
-│   ├── tailwind.config.ts
+│   ├── vite.config.ts            # @ alias + proxies /api -> :8000
+│   ├── mock-api.py               # standalone stub; frontend work without Postgres
+│   ├── scripts/verify-gateway.mjs
+│   ├── scripts/verify-api-surface.mjs
+│   ├── scripts/verify-date-parity.mjs
 │   └── src/
-│       ├── main.tsx
-│       ├── App.tsx               # 3-pane workspace shell
-│       ├── api/
-│       │   ├── client.ts         # fetch wrapper, injects X-User-Id
-│       │   └── types.gen.ts      # GENERATED from OpenAPI — never hand-edit
-│       ├── components/
+│       ├── main.tsx              # providers: Query, Router, AppState
+│       ├── App.tsx               # shell: routes + the hoisted import modal
+│       ├── app/                  # cross-cutting shell
+│       │   ├── routes.tsx        # route table
+│       │   ├── nav.ts            # typed navigation helpers (see note)
 │       │   ├── UserSwitcher.tsx
-│       │   ├── ImportResumeModal.tsx
-│       │   ├── TemplateModal.tsx
-│       │   ├── AnalysisPanel.tsx
-│       │   ├── TailorPanel.tsx
-│       │   ├── SuggestionCard.tsx
-│       │   ├── ChatPane.tsx
-│       │   └── ResumePreview.tsx
-│       └── lib/
-│
-└── scripts/
-    └── gen-types.sh              # OpenAPI -> TypeScript
+│       │   └── ThemeToggle.tsx
+│       ├── features/             # one folder per feature, colocated
+│       │   ├── resumes/          # MyResumes, ImportResumeModal
+│       │   ├── templates/        # ChooseTemplate, TemplateGrid, TemplateModal
+│       │   ├── analysis/         # AnalysisPane, ScoreRing
+│       │   ├── tailor/           # TailorPane, TailorModal
+│       │   ├── chat/             # ChatPane
+│       │   ├── preview/          # ResumePreview
+│       │   └── workspace/        # Workspace (composes the three panes)
+│       ├── components/ui/        # shadcn primitives ONLY
+│       ├── api/
+│       │   ├── client.ts         # axios: baseURL, X-User-Id, ApiError
+│       │   └── queries.ts        # React Query hooks
+│       ├── services/             # paths + payloads, no React (types.ts is the source)
+│       └── lib/                  # AppState, theme, score, utils
 ```
+
+**Feature-first, not type-first.** The earlier layout put every component in one flat `components/` bucket, which mixed generic primitives with feature panes — `ScoreRing` sat beside `AnalysisPane` with nothing marking one as reusable and the other as owned. A feature is now one folder rather than four greps. `components/ui/` stays type-grouped because those genuinely are shared primitives.
+
+**Why `app/nav.ts` is separate from `app/routes.tsx`:** a file exporting both a component and hooks trips `react-refresh/only-export-components` and breaks Fast Refresh. Same reason `lib/score.ts` holds `band()` instead of `ScoreRing.tsx`.
 
 **No Nx, Turborepo or Bazel.** Those earn their keep on many interdependent JavaScript packages with a build graph worth caching. This repo has two packages in two different languages with one dependency edge between them. A `Makefile` expresses that honestly and adds no configuration to learn:
 
@@ -750,6 +942,19 @@ resumeai/
 | `make clean` | Drop volumes, `data/`, caches |
 
 ### 9.4 The shared contract
+
+**A probe must own every byte it asserts on.** The surface check used to seed its uploaded resume by copying `structured_data` from whatever sorted first in `GET /resumes`. That held until a run left a tailored fork behind: the fork has one bullet, so the suggestion stage had too little content to generate three drafts and the probe reported a failure that was entirely its own. Its fixture is now declared inline in the script, and it passes repeatedly against a dirty database.
+
+**Date-label parity.** `frontend/scripts/verify-date-parity.mjs` guards the one rule deliberately implemented twice (§4.6.2). It transpiles the real `src/lib/dates.ts` with rolldown rather than restating its logic, then round-trips documents through `PUT /resumes/{id}/data` and compares the client's label against the server's derived mirror — across structured combinations, legacy free-text migration, the refuse-to-guess cases, and idempotence. 33 checks, green against the real API and the mock.
+
+**Surface check.** `frontend/scripts/verify-api-surface.mjs` drives **all 28 operations** through the real axios gateway and asserts response shapes, status codes, mutation side-effects (accept patches the resume and bumps `version_cursor`; reject does not), undo/redo cursor movement, export magic bytes, and cross-user 404s on all 15 resume-scoped routes. It must pass identically against the real API **and** `mock-api.py` — running it against both is what keeps the stub honest. It found 7 routes missing from the mock and 6 behavioural divergences, including a cross-user leak on `parse-status`. Its `+N points` assertion (§4.6.1) is the same arithmetic check the backend tests make, run against the live server.
+
+**Drift check.** `frontend/src/services/types.ts` is hand-written — there is no codegen step — so nothing stops the backend adding a field the UI silently ignores. `backend/scripts/check_contract_sync.py` diffs every shared schema in the live OpenAPI document against the TypeScript interfaces and exits non-zero on a mismatch. It found two real drifts on first run (`DeleteOut.children_orphaned`, `TailorIn.fork`), both introduced by the forking work.
+
+**Two vocabularies that are easy to conflate.** Suggestion *rows* carry `status` ∈ `pending | accepted | rejected`. The `/suggestions` endpoint groups them into *buckets* named `active | matched | rejected` (`pending`→`active`, `accepted`→`matched`). A status comparison written against the bucket names silently never matches.
+
+**Error-code map** (`main.py`): `ValidationError` and its subclasses (`UnsupportedFormat`, `QuotaExceeded`) → **422**, except `QuotaExceeded` → **429**; other `DomainError` → **400**; not-found → **404**. An unsupported upload is therefore 422, not 400.
+
 
 This is the actual payoff of colocating the two apps. The API contract is defined **once**, in Python, and flows outward automatically:
 
@@ -793,6 +998,7 @@ flowchart LR
 - **US1.2** Auto-convert into editable sections. *AC:* structured JSON for all standard sections; low-confidence sections flagged via `_meta.needs_review` rather than guessed.
 
 ### Epic 2 — Templates
+- **US2.0** See every resume, base and tailored, as a card in My Resumes with its strength score.
 - **US2.1** Preview and pick from multiple templates.
 - **US2.2** Switch templates without losing content.
 
@@ -878,7 +1084,7 @@ flowchart LR
 |---|---|
 | No auth means user scoping is not a security control | Documented in §12. Localhost only. Auth gates any deployment. |
 | Embedding endpoint unreliable (~74% success) | Local hashing fallback; retrieval degrades rather than fails. |
-| Free-tier model quality on bullet rewriting | Per-task routing; upgrading is a one-line `.env` change. |
+| Free-tier model quality on bullet rewriting | Per-task routing; upgrading is a one-line `backend/.env` change. |
 | Critic adds a second LLM call per suggestion | Accepted — truthfulness is the core promise. Retries bounded by `critic_max_revisions`. |
 | Vector layer is thin justification for a single resume | Stated honestly in §6.5; retained for the global corpora and future exemplars. |
 | LangGraph API churn across versions | Pin versions; the `interrupt` + `Command` round-trip is the contract to re-verify on upgrade. |
@@ -892,9 +1098,38 @@ flowchart LR
 
 ```bash
 git clone <repo> resumeai && cd resumeai
-cp .env.example .env          # add UNOROUTER_API_KEY (optional — the app runs without it)
+cp backend/.env.example backend/.env       # add UNOROUTER_API_KEY (optional)
+cp frontend/.env.example frontend/.env.local
 make dev                      # services + API + UI
 ```
+
+### 14.1 Two environment files, one boundary
+
+Configuration is split along the trust boundary rather than by convenience:
+
+| | `backend/.env` | `frontend/.env.local` |
+|---|---|---|
+| Read by | the FastAPI process, at startup | Vite, at **build** time |
+| Prefix | none | `VITE_` only |
+| Reaches the browser | never | **always** |
+| Holds | `UNOROUTER_API_KEY`, `DATABASE_URL`, MinIO keys | `VITE_API_BASE_URL`, `VITE_API_TIMEOUT_MS` |
+| Bootstrap | `make env-file` | `cp .env.example .env.local` |
+
+Vite inlines `VITE_*` values into the shipped bundle, so there is no such thing
+as a private value in the frontend file — the split makes that structural
+rather than a rule someone has to remember. Neither file sits at the repo root:
+a single shared file is exactly how a server secret ends up in a client bundle.
+
+`app/config.py` anchors the backend file as `BACKEND_DIR / ".env"`, an absolute
+path derived from `__file__`. pydantic-settings resolves a *relative* `env_file`
+against the current working directory, and a missing env file raises nothing —
+every setting silently falls back to its default. Anchoring on `__file__` makes
+the working directory irrelevant. `ROOT_DIR` remains the repo root, because
+`data/` (disk-fallback exports, the SQLite fallback database, LangGraph
+checkpoints) lives there and moving it would strand existing artefacts.
+
+`docker-compose.yml` is unaffected: it hardcodes every credential and performs
+no `${VAR}` interpolation, so it never consumed a root `.env`.
 
 `make dev` brings up the docker services, waits for Postgres and MinIO health checks, starts FastAPI with reload, and starts Vite. To run the pieces separately:
 
@@ -908,7 +1143,7 @@ make test                     # backend suite + acceptance gate
 
 Ports: UI `:5173` · API `:8000` · MinIO console `:9001` · Postgres `:5433` · Redis `:6379`.
 
-First boot seeds **5 users**, 5 templates, the two global RAG corpora, a demo resume and a sample job description, so the workspace is clickable immediately.
+First boot seeds **5 users**, 7 templates, the two global RAG corpora, a demo resume and a sample job description, so the workspace is clickable immediately.
 
 **Prerequisites:** Docker, Python 3.11+, Node 20+. Without Docker the app still starts — Postgres falls back to SQLite and MinIO to local disk (§9.2) — so `make api` alone is a valid way to work on the backend.
 

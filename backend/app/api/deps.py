@@ -108,8 +108,11 @@ def resume_service(
 
 def parsing_service(
     resumes: Annotated[ResumeRepository, Depends(resume_repo)],
+    vectors: Annotated[VectorRepository, Depends(vector_repo)],
 ) -> ParsingService:
-    return ParsingService(resumes)
+    # vectors is required so UPLOADED resumes get indexed for grounding
+    # retrieval; previously only the seeder ever called index_resume.
+    return ParsingService(resumes, vectors)
 
 
 def analysis_service(
@@ -154,8 +157,11 @@ def chat_service(
 
 def export_service(
     resumes: Annotated[ResumeRepository, Depends(resume_repo)],
+    templates: Annotated[TemplateRepository, Depends(template_repo)],
 ) -> ExportService:
-    return ExportService(resumes)
+    # templates is required for the PDF to honour design_tokens; without it
+    # every template would export identically.
+    return ExportService(resumes, templates)
 
 
 def jd_service(

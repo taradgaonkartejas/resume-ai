@@ -3,12 +3,28 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # app/config.py -> app/ -> backend/ -> repo root
+BACKEND_DIR = Path(__file__).resolve().parents[1]
 ROOT_DIR = Path(__file__).resolve().parents[2]
+
+# Two anchors, deliberately:
+#
+#   BACKEND_DIR  where .env lives. The backend owns its own configuration, so
+#                the frontend can own frontend/.env.local without the two
+#                fighting over one file at the root.
+#   ROOT_DIR     where runtime artefacts live (data/). It stays at the repo
+#                root because that is where the existing exports, the SQLite
+#                fallback database and the LangGraph checkpoints already are.
+#                Repointing it at backend/ would silently strand all of them.
+#
+# Both are absolute and derived from __file__, never from the cwd: env_file is
+# resolved relative to the working directory, so a relative ".env" would load
+# when uvicorn starts in backend/ and silently not load anywhere else — every
+# setting falling back to its default with no error.
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=ROOT_DIR / ".env",
+        env_file=BACKEND_DIR / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,

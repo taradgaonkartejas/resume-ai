@@ -3,9 +3,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from app.api.deps import suggestion_service, tailoring_service
+from app.api.deps import resume_service, suggestion_service, tailoring_service
 from app.identity import CurrentUser
 from app.schemas import SuggestionBuckets, TailorIn, TailorSessionOut
+from app.services.resume_service import ResumeService
 from app.services.suggestion_service import SuggestionService
 from app.services.tailoring_service import TailoringService
 
@@ -13,13 +14,30 @@ router = APIRouter(tags=["tailoring"])
 
 TailorSvc = Annotated[TailoringService, Depends(tailoring_service)]
 SuggestSvc = Annotated[SuggestionService, Depends(suggestion_service)]
+ResumeSvc = Annotated[ResumeService, Depends(resume_service)]
 
 
 @router.post("/resumes/{resume_id}/tailor", response_model=TailorSessionOut, status_code=201)
 def start_tailoring(
-    resume_id: uuid.UUID, payload: TailorIn, user_id: CurrentUser, svc: TailorSvc
+    resume_id: uuid.UUID,
+    payload: TailorIn,
+    user_id: CurrentUser,
+    svc: TailorSvc,
+    resumes: ResumeSvc,
 ):
-    return svc.start(resume_id, user_id, payload.jd_title, payload.jd_content)
+    """Start a tailoring session.
+
+    By default this FORKS the resume: the returned session's resume_id is the
+    new child, so the client should navigate to it. The base is untouched.
+    """
+    return svc.start(
+        resume_id,
+        user_id,
+        payload.jd_title,
+        payload.jd_content,
+        fork=payload.fork,
+        resume_service=resumes,
+    )
 
 
 @router.get("/resumes/{resume_id}/tailor", response_model=list[TailorSessionOut])

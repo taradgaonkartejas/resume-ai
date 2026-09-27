@@ -14,6 +14,14 @@
 
         python -m app.cli db push --seed
 
+    Configuration is read from backend\.env (this script's own directory),
+    not the repo root. `.\make.ps1 env-file` creates it from .env.example.
+
+    If PowerShell refuses to run this file ("not digitally signed"), either
+    use the CLI directly as above, or:
+
+        powershell -ExecutionPolicy Bypass -File .\make.ps1 db-push-seed
+
 .EXAMPLE
     .\make.ps1                      # list targets
 .EXAMPLE
@@ -41,9 +49,18 @@ $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 
 # --- locate the interpreter -------------------------------------------------
-# Prefer a local venv if one exists (Windows layout first, then Unix so this
-# file also works under WSL/Git Bash). Otherwise fall back to whatever `python`
-# is on PATH, which is the active conda env.
+# Priority order:
+#   1. a local .venv, if you use one
+#   2. $env:CONDA_PREFIX — the ACTIVATED env, which is authoritative
+#   3. plain `python` from PATH
+#
+# Step 2 is the important one. "python on PATH" and "the activated conda env"
+# are NOT the same thing: Anaconda installs that add base to the system PATH
+# can leave the prompt reading (resume-ai) while `python` still resolves to
+# C:\ProgramData\anaconda3. Every package installed into the env is then
+# invisible, and you get a ModuleNotFoundError for something `conda list`
+# plainly shows as installed. CONDA_PREFIX is set by `conda activate` itself,
+# so it cannot disagree with the prompt.
 function Resolve-Python {
     $candidates = @(
         (Join-Path $PSScriptRoot '.venv\Scripts\python.exe'),
@@ -52,12 +69,40 @@ function Resolve-Python {
     foreach ($c in $candidates) {
         if (Test-Path -LiteralPath $c) { return $c }
     }
+
+    if ($env:CONDA_PREFIX) {
+        $condaPy = @(
+            (Join-Path $env:CONDA_PREFIX 'python.exe'),
+            (Join-Path $env:CONDA_PREFIX 'bin/python')
+        )
+        foreach ($c in $condaPy) {
+            if (Test-Path -LiteralPath $c) { return $c }
+        }
+    }
+
     $onPath = Get-Command python -ErrorAction SilentlyContinue
     if ($onPath) { return $onPath.Source }
     throw "No Python found. Activate the conda env (conda activate resume-ai) or create a venv."
 }
 
 $PY = Resolve-Python
+
+# If an env is activated but we ended up on a different interpreter anyway,
+# say so loudly rather than failing later with a confusing import error.
+if ($env:CONDA_PREFIX) {
+    # Using Here-Strings to completely avoid PowerShell variable interpolation issues
+    $running = $null
+    $running = & $PY -c @'
+import sys
+print(sys.prefix)
+'@ 2>$null
+
+    if ($running -and ($running.Trim() -ne $env:CONDA_PREFIX.TrimEnd('\', '/'))) {
+        Write-Host "warning: activated env is $($env:CONDA_PREFIX)" -ForegroundColor Yellow
+        Write-Host "         but the interpreter reports $running" -ForegroundColor Yellow
+        Write-Host "         run '.\make.ps1 which-python' to inspect" -ForegroundColor Yellow
+    }
+}
 
 function Invoke-Py {
     param([string[]]$Arguments)
@@ -89,9 +134,15 @@ function Show-Help {
     Write-Host "  logs            follow logs"
     Write-Host "  down            stop (volumes survive)"
     Write-Host ""
-    Write-Host "Environment (environment.yaml is the source of truth)" -ForegroundColor Yellow
+    Write-Host "Environment (environment.yaml = packages, .env = settings)" -ForegroundColor Yellow
+    Write-Host "  env-file        create backend\.env from .env.example"
+    Write-Host "  which-python    show which interpreter these targets use"
+    Write-Host "  doctor          diagnose a broken environment"
     Write-Host "  env             conda env create -f environment.yaml"
     Write-Host "  env-update      conda env update --prune"
+    Write-Host ""
+    Write-Host "  backend\.env is THIS directory's config and holds real secrets." -ForegroundColor DarkGray
+    Write-Host "  The browser app is configured separately in frontend\.env.local." -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "Schema (app/models.py is the source of truth)" -ForegroundColor Yellow
     Write-Host "  db-push         create database + tables to match the models"
@@ -133,6 +184,27 @@ switch ($Target.ToLowerInvariant()) {
     'logs'           { Push-Location ..; try { docker compose logs -f } finally { Pop-Location } }
     'down'           { Push-Location ..; try { docker compose down } finally { Pop-Location } }
 
+    'env-file' {
+        # Never clobber an existing .env: it holds the only copy of the API
+        # key, and a task runner that silently overwrites secrets is one
+        # nobody can trust. Re-running this is always safe.
+        $envPath = Join-Path $PSScriptRoot '.env'
+        if (Test-Path -LiteralPath $envPath) {
+            Write-Host "backend\.env already exists - leaving it alone." -ForegroundColor Yellow
+        } else {
+            Copy-Item -LiteralPath (Join-Path $PSScriptRoot '.env.example') -Destination $envPath
+            Write-Host "created backend\.env - add UNOROUTER_API_KEY (optional)." -ForegroundColor Green
+        }
+    }
+
+    'which-python' {
+        Write-Host $PY
+        Invoke-Py @('-c', 'import sys; print("prefix :", sys.prefix)')
+        Invoke-Py @('-c', 'import os; print("CONDA_PREFIX:", os.environ.get("CONDA_PREFIX", "(unset)"))')
+        Invoke-Py @('-c', 'import importlib.util as u; print("fastapi:", "OK" if u.find_spec("fastapi") else "MISSING")')
+    }
+
+    'doctor'         { Invoke-Py @('doctor.py') }
     'env'            { conda env create -f environment.yaml }
     'env-update'     { conda env update -f environment.yaml --prune }
 

@@ -38,6 +38,9 @@ class ResumeOut(BaseModel):
     parse_status: str
     parse_note: str
     template_key: str
+    kind: str = "base"
+    parent_id: uuid.UUID | None = None
+    tailored_for: str = ""
     version_cursor: int
     updated_at: datetime
 
@@ -48,8 +51,30 @@ class ResumeSummaryOut(BaseModel):
     title: str
     template_key: str
     parse_status: str
+    kind: str = "base"
+    parent_id: uuid.UUID | None = None
+    tailored_for: str = ""
     version_cursor: int
     updated_at: datetime
+    # Latest analysis score, or None when never analysed. None is NOT 0:
+    # a card showing 0% would read as a terrible resume rather than an
+    # unmeasured one.
+    overall_score: int | None = None
+    # Enough content to render the card thumbnail without a fetch per card.
+    structured_data: dict = Field(default_factory=dict)
+
+
+class ResumeForkIn(BaseModel):
+    title: str = ""
+    tailored_for: str = ""
+
+
+class ResumeRenameIn(BaseModel):
+    title: str
+
+
+class ResumeCreateIn(BaseModel):
+    title: str = "Untitled resume"
 
 
 class ResumeDataIn(BaseModel):
@@ -77,10 +102,53 @@ class AnalysisOut(BaseModel):
     created_at: datetime
 
 
+# ---------- guided step editor ----------
+class FindingOut(BaseModel):
+    """One actionable recommendation.
+
+    `points` is a promise: fixing this raises overall_score by exactly that
+    much (tests/test_findings.py enforces it).
+    """
+
+    id: str
+    category: str
+    target_ref: str
+    severity: str
+    points: int
+    message: str
+    fix_hint: str
+    action: str = ""
+    meta: dict = Field(default_factory=dict)
+
+
+class StepOut(BaseModel):
+    id: str
+    index: int
+    title: str
+    description: str
+    score: int
+    max: int
+    points_available: int
+    finding_count: int
+    status: str
+    findings: list[FindingOut] = Field(default_factory=list)
+
+
+class AnalysisStepsOut(BaseModel):
+    resume_id: uuid.UUID
+    overall_score: int
+    max_score: int
+    points_available: int
+    steps: list[StepOut] = Field(default_factory=list)
+
+
 # ---------- tailoring ----------
 class TailorIn(BaseModel):
     jd_title: str = ""
     jd_content: str
+    # Tailoring forks a new resume so the base stays pristine and each job
+    # gets its own card. false keeps the old in-place behaviour.
+    fork: bool = True
 
 
 class TailorSessionOut(BaseModel):
@@ -203,6 +271,9 @@ class DeleteOut(BaseModel):
     deleted: str
     vectors_removed: int
     objects_removed: int
+    # Forks are detached, not cascaded: deleting a base must never silently
+    # delete the tailored versions already sent to employers.
+    children_orphaned: int = 0
 
 
 class MessageOut(BaseModel):

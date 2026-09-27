@@ -91,6 +91,39 @@ def _is_postgres(url) -> bool:
     return url.get_backend_name() == "postgresql"
 
 
+def _explain_connect_failure(url, exc: Exception) -> None:
+    """Print the cause that actually matches the exception.
+
+    A bare 'is Postgres running?' is wrong — and actively misleading — when the
+    driver is broken or the DSN was mis-parsed. Both look identical at the call
+    site, so discriminate here.
+    """
+    text = str(exc)
+
+    if "No module named" in text and "psycopg" in text:
+        fail(f"The psycopg2 driver is not importable — {exc}")
+        dim("  Its compiled extension is missing, not the server. Reinstall it:")
+        dim("    pip install --force-reinstall --no-cache-dir psycopg2-binary==2.9.13")
+        return
+
+    # An unencoded '@' in the password splits the DSN at the wrong place: the
+    # parser takes the LAST '@' as the delimiter, so the password tail ends up
+    # inside the hostname. A literal '@' in url.host can mean nothing else.
+    if url.host and "@" in url.host:
+        real_host = url.host.split("@", 1)[1]
+        fail(f"Cannot reach the server at {url.host}:{url.port} — {exc}")
+        dim(f"  '{url.host}' is not a hostname. The password contains an '@',")
+        dim("  which splits the DSN — percent-encode it as %40:")
+        dim(
+            f"    DATABASE_URL=...://{url.username}:<pass with %40>"
+            f"@{real_host}:{url.port}/{url.database}"
+        )
+        return
+
+    fail(f"Cannot reach the server at {url.host}:{url.port} — {exc}")
+    dim("Is Postgres running?  ./START-POSTGRES.sh   or   docker compose up -d")
+
+
 # ----------------------------------------------------------- database DDL
 def _database_exists(url) -> bool:
     import psycopg2
@@ -143,8 +176,7 @@ def cmd_create(args) -> int:
             ok(f"Database {url.database!r} already exists.")
             return 0
     except Exception as exc:
-        fail(f"Cannot reach the server at {url.host}:{url.port} — {exc}")
-        dim("Is Postgres running?  ./START-POSTGRES.sh   or   docker compose up -d")
+        _explain_connect_failure(url, exc)
         return 1
 
     # The database name is an identifier, so it cannot be a bound parameter.
@@ -319,7 +351,7 @@ def cmd_status(args) -> int:
             dim("Run: python -m app.cli db push")
             return 1
     except Exception as exc:
-        fail(f"Cannot reach the server — {exc}")
+        _explain_connect_failure(url, exc)
         return 1
 
     from app.db import DB_BACKEND, engine, has_pgvector
@@ -394,6 +426,11 @@ def cmd_reset(args) -> int:
 
 # ------------------------------------------------------------------ db sql
 def cmd_sql(args) -> int:
+    # DDL is generated from the ORM metadata alone. Tell app.db not to probe
+    # the server, or this fails whenever Postgres happens to be down — which
+    # is often exactly when you want to read the schema.
+    os.environ["RESUMEAI_NO_DB_PROBE"] = "1"
+
     from app.dbinit import write_sql
 
     if args.out:

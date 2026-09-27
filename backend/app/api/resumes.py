@@ -8,8 +8,11 @@ from app.identity import CurrentUser
 from app.schemas import (
     DeleteOut,
     ParseStatusOut,
+    ResumeCreateIn,
     ResumeDataIn,
+    ResumeForkIn,
     ResumeOut,
+    ResumeRenameIn,
     ResumeSummaryOut,
     TemplateIn,
 )
@@ -39,6 +42,27 @@ async def upload_resume(
     resume = svc.create_from_upload(user_id, title, file.filename or "resume.txt", content)
     # Parse inline: a local 5-user app does not need a job queue.
     return parser.parse_resume(resume.id, user_id)
+
+
+@router.post("/resumes", response_model=ResumeOut, status_code=201)
+def create_resume(payload: ResumeCreateIn, user_id: CurrentUser, svc: ResumeSvc):
+    """Blank resume for the library's 'New Resume' card."""
+    return svc.create_blank(user_id, payload.title)
+
+
+@router.post("/resumes/{resume_id}/fork", response_model=ResumeOut, status_code=201)
+def fork_resume(
+    resume_id: uuid.UUID, payload: ResumeForkIn, user_id: CurrentUser, svc: ResumeSvc
+):
+    """Copy a resume so a base and its tailored variants can coexist."""
+    return svc.fork(resume_id, user_id, payload.title, payload.tailored_for)
+
+
+@router.patch("/resumes/{resume_id}", response_model=ResumeOut)
+def rename_resume(
+    resume_id: uuid.UUID, payload: ResumeRenameIn, user_id: CurrentUser, svc: ResumeSvc
+):
+    return svc.rename(resume_id, user_id, payload.title)
 
 
 @router.get("/resumes/{resume_id}", response_model=ResumeOut)

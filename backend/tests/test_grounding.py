@@ -83,8 +83,11 @@ def test_accept_fails_when_target_vanishes(client, priya):
         headers=headers,
         json={"jd_title": "SRE", "jd_content": "Terraform Prometheus GitOps AWS"},
     ).json()
+    # Tailoring forks: the suggestions belong to the child, so the section
+    # must be stripped from the CHILD for this test to exercise the guard.
+    working_id = session["resume_id"]
     buckets = client.get(
-        f"/api/resumes/{resume_id}/tailor/{session['id']}/suggestions",
+        f"/api/resumes/{working_id}/tailor/{session['id']}/suggestions",
         headers=headers,
     ).json()
     target = next(
@@ -96,7 +99,7 @@ def test_accept_fails_when_target_vanishes(client, priya):
     stripped = dict(RESUME)
     stripped["experience"] = []
     client.put(
-        f"/api/resumes/{resume_id}/data",
+        f"/api/resumes/{working_id}/data",
         headers=headers,
         json={"structured_data": stripped},
     )

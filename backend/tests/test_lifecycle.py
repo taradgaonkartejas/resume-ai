@@ -26,19 +26,27 @@ JD = {"jd_title": "SRE", "jd_content": "Terraform Prometheus GitOps AWS Grafana"
 
 
 def _start(client, headers, resume_id):
+    """Start tailoring and return the session, its buckets, and the resume the
+    session actually belongs to.
+
+    Tailoring FORKS by default, so the suggestions apply to a new child
+    resume, not the one passed in. Tests must follow session["resume_id"] or
+    they assert against the deliberately-untouched base.
+    """
     session = client.post(
         f"/api/resumes/{resume_id}/tailor", headers=headers, json=JD
     ).json()
+    working_id = session["resume_id"]
     buckets = client.get(
-        f"/api/resumes/{resume_id}/tailor/{session['id']}/suggestions", headers=headers
+        f"/api/resumes/{working_id}/tailor/{session['id']}/suggestions", headers=headers
     ).json()
-    return session, buckets
+    return session, buckets, working_id
 
 
 def test_accept_applies_text_and_bumps_version(client, priya):
     resume_id = new_resume(client, priya, "Lifecycle", RESUME)
     headers = {"X-User-Id": priya}
-    _, buckets = _start(client, headers, resume_id)
+    _, buckets, resume_id = _start(client, headers, resume_id)
     suggestion = buckets["active"][0]
 
     before = client.get(f"/api/resumes/{resume_id}", headers=headers).json()
@@ -55,7 +63,7 @@ def test_accept_applies_text_and_bumps_version(client, priya):
 def test_reject_leaves_resume_untouched(client, priya):
     resume_id = new_resume(client, priya, "Lifecycle", RESUME)
     headers = {"X-User-Id": priya}
-    _, buckets = _start(client, headers, resume_id)
+    _, buckets, resume_id = _start(client, headers, resume_id)
     suggestion = buckets["active"][0]
 
     before = client.get(f"/api/resumes/{resume_id}", headers=headers).json()
@@ -71,7 +79,7 @@ def test_reject_leaves_resume_untouched(client, priya):
 def test_edit_then_accept_applies_edited_text(client, priya):
     resume_id = new_resume(client, priya, "Lifecycle", RESUME)
     headers = {"X-User-Id": priya}
-    _, buckets = _start(client, headers, resume_id)
+    _, buckets, resume_id = _start(client, headers, resume_id)
     suggestion = buckets["active"][0]
 
     custom = "Completely custom replacement text."
@@ -91,7 +99,7 @@ def test_edit_then_accept_applies_edited_text(client, priya):
 def test_double_accept_is_rejected(client, priya):
     resume_id = new_resume(client, priya, "Lifecycle", RESUME)
     headers = {"X-User-Id": priya}
-    _, buckets = _start(client, headers, resume_id)
+    _, buckets, resume_id = _start(client, headers, resume_id)
     suggestion = buckets["active"][0]
 
     first = client.patch(
@@ -107,7 +115,7 @@ def test_double_accept_is_rejected(client, priya):
 def test_accept_recomputes_match_score(client, priya):
     resume_id = new_resume(client, priya, "Lifecycle", RESUME)
     headers = {"X-User-Id": priya}
-    session, buckets = _start(client, headers, resume_id)
+    session, buckets, resume_id = _start(client, headers, resume_id)
     baseline = session["baseline_percent"]
 
     client.patch(
