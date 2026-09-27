@@ -208,6 +208,7 @@ class TailoringService:
                     agent=step["agent"],
                     task="tailor",
                     model=step.get("model", ""),
+                    status=step.get("status", "ok"),
                     latency_ms=step.get("latency_ms", 0),
                     tokens_in=step.get("tokens_in", 0),
                     tokens_out=step.get("tokens_out", 0),

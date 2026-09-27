@@ -109,10 +109,13 @@ def resume_service(
 def parsing_service(
     resumes: Annotated[ResumeRepository, Depends(resume_repo)],
     vectors: Annotated[VectorRepository, Depends(vector_repo)],
+    versions: Annotated[VersionService, Depends(version_service)],
 ) -> ParsingService:
     # vectors is required so UPLOADED resumes get indexed for grounding
     # retrieval; previously only the seeder ever called index_resume.
-    return ParsingService(resumes, vectors)
+    # versions lets reparse() record a restore point before it overwrites
+    # whatever the user had edited.
+    return ParsingService(resumes, vectors, versions)
 
 
 def analysis_service(

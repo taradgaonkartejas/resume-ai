@@ -19,6 +19,7 @@ from app.api import (
 )
 from app.db import init_db
 from app.services.exceptions import (
+    ConflictError,
     DomainError,
     NotFoundError,
     QuotaExceeded,
@@ -58,6 +59,11 @@ async def _quota(request: Request, exc: QuotaExceeded):
 @app.exception_handler(ValidationError)
 async def _validation(request: Request, exc: ValidationError):
     return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+
+@app.exception_handler(ConflictError)
+async def _conflict(_request, exc: ConflictError):
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
 @app.exception_handler(DomainError)

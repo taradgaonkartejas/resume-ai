@@ -8,15 +8,18 @@ something unusable. No agent talks to HTTP or commits a transaction.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 
 from app.ai import llm, prompts
 from app.ai.schemas import (
     ChatReply,
+    CriticBatch,
     CriticVerdict,
     DraftSuggestion,
     JDAnalysis,
+    RevisionDraft,
     ScoringCommentary,
     WriterOutput,
 )
@@ -307,25 +310,25 @@ def _rule_drafts(bullets, gaps: list[str], limit: int) -> list[dict]:
 
 
 # -------------------------------------------------------------- critic agent
-def review_draft(draft: dict, structured_data: dict) -> AgentOutcome:
-    """Hard checks first, then optional LLM judgement.
+def _hard_check(draft: dict, structured_data: dict) -> AgentOutcome | None:
+    """Non-negotiable checks that run with or without a key.
 
-    The hard checks are not negotiable and run with or without a key:
-    the target_ref must resolve, and original_text must match verbatim.
+    The target_ref must resolve and original_text must match the resume
+    verbatim. Neither needs a model, and neither may be skipped.
     """
     ref = draft.get("target_ref", "")
     if not resume_ops.exists(structured_data, ref):
         return AgentOutcome(
             value=CriticVerdict(
-                approved=False, notes=f"target_ref {ref} does not resolve",
+                approved=False,
+                notes=f"target_ref {ref} does not resolve",
                 severity="fabrication",
             ),
             agent="critic",
             notes=["hard check: unresolvable target_ref"],
         )
 
-    actual = resume_ops.resolve(structured_data, ref)
-    if actual != draft.get("original_text", ""):
+    if resume_ops.resolve(structured_data, ref) != draft.get("original_text", ""):
         return AgentOutcome(
             value=CriticVerdict(
                 approved=False,
@@ -335,39 +338,130 @@ def review_draft(draft: dict, structured_data: dict) -> AgentOutcome:
             agent="critic",
             notes=["hard check: original_text mismatch"],
         )
+    return None
 
-    if llm.is_configured():
-        try:
-            payload = (
-                f"Original bullet:\n{actual}\n\n"
-                f"Proposed rewrite:\n{draft.get('suggested_text','')}\n\n"
-                f"Keywords the writer claims to have added: "
-                f"{', '.join(draft.get('keywords', []))}"
+
+def _batch_payload(pending: list[tuple[int, str, dict]]) -> str:
+    """One numbered block per draft.
+
+    The originals are labelled and fenced rather than trailing off the end of
+    the prompt: the previous layout ended with "Keywords the writer claims to
+    have added: ..." and models were observed *continuing* that sentence
+    instead of answering, which is a prompt bug wearing a parse error.
+    """
+    blocks = []
+    for position, (_, actual, draft) in enumerate(pending, start=1):
+        keywords = ", ".join(draft.get("keywords", []) or []) or "(none)"
+        blocks.append(
+            f"[{position}]\n"
+            f"ORIGINAL: {actual}\n"
+            f"PROPOSED: {draft.get('suggested_text', '')}\n"
+            f"KEYWORDS THE WRITER CLAIMS TO HAVE ADDED: {keywords}"
+        )
+    header = (
+        f"Check {len(pending)} proposed rewrite(s). "
+        f"Return one verdict per numbered item.\n\n"
+    )
+    return header + "\n\n".join(blocks)
+
+
+def review_batch(drafts: list[dict], structured_data: dict) -> list[AgentOutcome]:
+    """Judge every draft, using a single LLM call for all of them.
+
+    One call rather than one per draft because the free tier allows one request
+    per minute per model per account: a six-draft run made as six calls is
+    guaranteed to be throttled partway through, and a throttled critic silently
+    becomes the rule engine.
+    """
+    results: list[AgentOutcome] = [None] * len(drafts)  # type: ignore[list-item]
+    pending: list[tuple[int, str, dict]] = []
+
+    for i, draft in enumerate(drafts):
+        failed = _hard_check(draft, structured_data)
+        if failed is not None:
+            results[i] = failed
+            continue
+        pending.append((i, resume_ops.resolve(structured_data, draft["target_ref"]), draft))
+
+    if not pending:
+        return results
+
+    if not llm.is_configured():
+        # No key configured at all -- expected, not a degradation.
+        for i, actual, draft in pending:
+            results[i] = AgentOutcome(
+                value=_rule_critique(actual, draft),
+                agent="critic",
+                notes=["rule-engine critique"],
             )
-            parsed, call = llm.structured(
-                task="critique",
-                system=prompts.CRITIC,
-                user=payload,
-                schema=CriticVerdict,
-                temperature=0.0,
+        return results
+
+    try:
+        parsed, call = llm.structured(
+            task="critique",
+            system=prompts.CRITIC,
+            user=_batch_payload(pending),
+            schema=CriticBatch,
+            temperature=0.0,
+        )
+        by_index = {v.index: v for v in parsed.verdicts}
+        expected = set(range(1, len(pending) + 1))
+        if set(by_index) != expected:
+            raise ValueError(
+                f"critic returned verdicts {sorted(by_index)} for {len(pending)} draft(s)"
             )
-            return AgentOutcome(
-                value=parsed,
+
+        # One call's cost is shared; attributing it to every draft would
+        # multiply the reported token spend by the batch size.
+        for position, (i, _actual, _draft) in enumerate(pending, start=1):
+            verdict = by_index[position]
+            first = position == 1
+            results[i] = AgentOutcome(
+                value=CriticVerdict(
+                    approved=verdict.approved,
+                    notes=verdict.notes,
+                    severity=verdict.severity,
+                ),
                 agent="critic",
                 model=call.model,
-                latency_ms=call.latency_ms,
-                tokens_in=call.tokens_in,
-                tokens_out=call.tokens_out,
+                latency_ms=call.latency_ms if first else 0,
+                status=call.status,
+                tokens_in=call.tokens_in if first else 0,
+                tokens_out=call.tokens_out if first else 0,
                 used_llm=True,
+                notes=(
+                    [f"critic answered via {call.status} salvage, not json_schema"]
+                    if call.status != "ok"
+                    else []
+                ),
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Critic fell back to rules: %s", exc)
+        return results
 
-    return AgentOutcome(
-        value=_rule_critique(actual, draft),
-        agent="critic",
-        notes=["rule-engine critique"],
-    )
+    except Exception as exc:  # noqa: BLE001
+        # Degraded, not merely "no LLM". The rule critic checks three hardcoded
+        # phrases, so an inflated metric ("8 teams" -> "20 teams") walks
+        # straight through it. This must be visible, not just logged: silently
+        # swapping the anti-fabrication gate for a substring match is the worst
+        # failure this system has.
+        logger.warning("Critic fell back to rules: %s", exc)
+        for i, actual, draft in pending:
+            results[i] = AgentOutcome(
+                value=_rule_critique(actual, draft),
+                agent="critic",
+                status="degraded",
+                notes=[f"critic LLM unavailable, rule engine used: {exc}"],
+            )
+        return results
+
+
+def review_draft(draft: dict, structured_data: dict) -> AgentOutcome:
+    """Judge a single draft.
+
+    A one-element batch, so the single-draft path callers use and the batched
+    path the tailor graph uses are the same code. The critic corpus therefore
+    measures what actually ships.
+    """
+    return review_batch([draft], structured_data)[0]
 
 
 _FABRICATION_HINTS = ("led a team of", "promoted to", "managed a budget")
@@ -379,8 +473,6 @@ def _rule_critique(original: str, draft: dict) -> CriticVerdict:
         return CriticVerdict(approved=False, notes="empty rewrite", severity="minor")
 
     # A new number that was not in the original is a fabricated metric.
-    import re
-
     originals = set(re.findall(r"\d+(?:\.\d+)?", original))
     proposed = set(re.findall(r"\d+(?:\.\d+)?", suggested))
     invented = proposed - originals
@@ -406,6 +498,220 @@ def _rule_critique(original: str, draft: dict) -> CriticVerdict:
         )
 
     return CriticVerdict(approved=True, notes="", severity="none")
+
+
+# --------------------------------------------------- targeted finding rewrite
+# Word-ish tokens for the deterministic fallback's keyword list.
+_WORD_RE = re.compile(r"[A-Za-z][A-Za-z+.#-]{2,}")
+
+
+def rewrite_for_finding(
+    structured_data: dict,
+    target_ref: str,
+    finding: dict,
+    user_id: uuid.UUID | None = None,
+    resume_id: uuid.UUID | None = None,
+    store: VectorStore | None = None,
+) -> AgentOutcome:
+    """Draft a fix for ONE finding at ONE target_ref.
+
+    Distinct from write_suggestions, which is JD-gap driven and drafts across
+    every bullet. Here the driver is a finding, and there is exactly one target.
+
+    Two prompt paths, because they are genuinely different jobs:
+
+      revise    the ref holds text -> improve it without inventing anything.
+      compose   the ref resolves to "" (summary.missing) -> write it from the
+                experience the resume already contains. Feeding an empty
+                original into a "improve this" prompt produces a summary
+                written from nothing, which is the one thing the critic exists
+                to stop.
+    """
+    original = resume_ops.resolve(structured_data, target_ref)
+    composing = not original.strip()
+
+    context = _grounding_context(
+        structured_data, target_ref, user_id, resume_id, store, composing
+    )
+
+    if llm.is_configured():
+        try:
+            system = (
+                prompts.COMPOSER.format(context=context)
+                if composing
+                else prompts.REVISER.format(context=context)
+            )
+            payload = (
+                f"Problem to fix: {finding.get('message', '')}\n"
+                f"Guidance: {finding.get('fix_hint', '')}\n\n"
+            )
+            payload += (
+                "Write the missing section."
+                if composing
+                else f"Current text:\n{original}"
+            )
+            parsed, call = llm.structured(
+                task="writing",
+                system=system,
+                user=payload,
+                schema=RevisionDraft,
+                temperature=0.4,
+            )
+            text = (parsed.suggested_text or "").strip()
+            if text:
+                return AgentOutcome(
+                    value={
+                        "target_ref": target_ref,
+                        "original_text": original,
+                        "suggested_text": text,
+                        "keywords": [k for k in parsed.keywords if k][:8],
+                        "reasoning": (parsed.reasoning or "").strip(),
+                    },
+                    agent="writer",
+                    model=call.model,
+                    latency_ms=call.latency_ms,
+                    tokens_in=call.tokens_in,
+                    tokens_out=call.tokens_out,
+                    used_llm=True,
+                )
+            logger.warning("rewrite_for_finding: model returned empty text")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("rewrite_for_finding fell back to rules: %s", exc)
+            return AgentOutcome(
+                value=_rule_rewrite(original, finding, composing, structured_data),
+                agent="writer",
+                status="degraded",
+                notes=[f"writer LLM unavailable, rule engine used: {exc}"],
+            )
+
+    return AgentOutcome(
+        value=_rule_rewrite(original, finding, composing, structured_data),
+        agent="writer",
+        notes=["rule-engine rewrite"],
+    )
+
+
+def _grounding_context(
+    structured_data: dict,
+    target_ref: str,
+    user_id: uuid.UUID | None,
+    resume_id: uuid.UUID | None,
+    store: VectorStore | None,
+    composing: bool,
+) -> str:
+    """This candidate's own text, for tone (revise) or substance (compose).
+
+    Composing a summary needs the whole resume, not five similar bullets --
+    the summary has to be true of the document as a whole.
+    """
+    if composing:
+        lines = [
+            f"- {text}" for _ref, _placement, text in resume_ops.iter_bullets(structured_data)
+        ][:12]
+        roles = [
+            f"- {e.get('role', '')} at {e.get('company', '')}".strip()
+            for e in (structured_data.get("experience") or [])
+        ][:6]
+        block = "\n".join(roles + lines)
+        return block or "(none)"
+
+    if store is None or user_id is None:
+        return "(none)"
+    try:
+        seed = resume_ops.resolve(structured_data, target_ref)
+        hits = store.search(
+            seed, corpus="resume_bullets", user_id=user_id, resume_id=resume_id, k=5
+        )
+        return _context_block(hits)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("rewrite retrieval failed: %s", exc)
+        return "(none)"
+
+
+def _rule_rewrite(
+    original: str, finding: dict, composing: bool, structured_data: dict
+) -> dict:
+    """Deterministic fallback. Honest rather than clever.
+
+    It must never invent a fact, so it can only do mechanical things: swap a
+    weak opener for a strong one, trim an overlong bullet at a clause boundary,
+    or assemble a summary from role titles that are already in the document.
+    The card labels this as written without AI.
+    """
+    keywords: list[str] = []
+    text = original.strip()
+
+    if composing:
+        roles = [
+            (e.get("role") or "").strip()
+            for e in (structured_data.get("experience") or [])
+            if (e.get("role") or "").strip()
+        ]
+        skills = [
+            item
+            for group in (structured_data.get("skills") or [])
+            for item in (group.get("items") or [])
+        ][:4]
+        lead = roles[0] if roles else "Professional"
+        # No counts. A number here is a number the original text did not have,
+        # and _rule_critique correctly reads that as an invented metric -- the
+        # fallback would fabricate its way straight into a 422.
+        tail = f" with hands-on experience across {', '.join(skills)}." if skills else "."
+        text = f"{lead} focused on practical delivery{tail}"
+        keywords = skills
+        return {
+            "target_ref": "",
+            "original_text": original,
+            "suggested_text": text,
+            "keywords": keywords,
+            "reasoning": (
+                "Assembled from the roles and skills already in your resume. "
+                "Written without AI - edit it before accepting."
+            ),
+        }
+
+    fid = finding.get("id", "")
+    reason = "Mechanical fix applied without AI."
+
+    if fid.endswith("weak_verbs") or fid.endswith("no_action_verb"):
+        words = text.split()
+        if words:
+            swapped = _STRONGER.get(words[0].lower())
+            if swapped:
+                words[0] = swapped if text[:1].islower() else swapped.capitalize()
+                text = " ".join(words)
+                keywords = [words[0]]
+                reason = f"Opened with a stronger verb ({words[0]})."
+    elif fid.endswith("overlong_bullets"):
+        parts = re.split(r",\s+", text)
+        if len(parts) > 1:
+            trimmed = parts[0].rstrip(".")
+            if len(trimmed.split()) >= 6:
+                text = trimmed + "."
+                reason = "Trimmed to the first clause to get under the length cap."
+
+    return {
+        "target_ref": "",
+        "original_text": original,
+        "suggested_text": text,
+        "keywords": keywords,
+        "reasoning": reason + " Written without AI - review before accepting.",
+    }
+
+
+_STRONGER = {
+    "worked": "delivered",
+    "helped": "drove",
+    "assisted": "supported",
+    "responsible": "owned",
+    "handled": "managed",
+    "did": "executed",
+    "made": "built",
+    "used": "applied",
+    "participated": "contributed",
+    "involved": "led",
+}
+
 
 
 # ---------------------------------------------------------------- chat agent

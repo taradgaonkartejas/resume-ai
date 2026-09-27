@@ -35,7 +35,23 @@ class Settings(BaseSettings):
     unorouter_base_url: str = "https://api.unorouter.com/v1"
     model_default: str = "gemini-3.5-flash-lite:free"
     embedding_model: str = "gemini-embedding-2:free"
-    llm_timeout_seconds: int = 90
+    # When true, any model whose name does not end in ":free" is refused before
+    # a request is ever sent. UnoRouter bills per token, the default model does
+    # not have 100% uptime, and a fallback chain is exactly the code path that
+    # quietly reaches for a paid model at 3am. Opt out deliberately.
+    free_models_only: bool = True
+    # Embeddings run locally by default, and not only to save money.
+    #   1. gemini-embedding-2:free reports 24.3% success, so ~3 in 4 calls
+    #      already fell through to the local embedder.
+    #   2. The pgvector column is Vector(embedding_dim) = 384. Hosted Gemini
+    #      embeddings are not 384-dimensional, so a *successful* remote call is
+    #      the case that breaks the insert.
+    #   3. Mixing two embedding spaces in one index makes cosine similarity
+    #      meaningless -- worse than either space used consistently.
+    # For a 5-user local deployment over a small corpus, one consistent space
+    # beats a 24% chance of a better one.
+    embeddings_remote: bool = False
+    llm_timeout_seconds: int = 45
     critic_max_revisions: int = 2
 
     # Data

@@ -1,4 +1,9 @@
-import { DEFAULT_DESIGN_TOKENS, type DesignTokens, type StructuredData } from "@/services";
+import {
+  DEFAULT_DESIGN_TOKENS,
+  type DesignTokens,
+  type ExtraEntry,
+  type StructuredData,
+} from "@/services";
 import { dateLabel } from "@/lib/dates";
 import { cn } from "cn";
 
@@ -86,6 +91,22 @@ function SectionHeading({ title, tokens }: { title: string; tokens: DesignTokens
   );
 }
 
+/**
+ * One extras entry as a single display line.
+ *
+ * Mirrors resume_ops.extra_entry_line so the preview, the PDF, the DOCX and the
+ * TXT can never drift into four renderings of the same data.
+ */
+function extraLine(entry: ExtraEntry): string {
+  const head = [entry.primary, entry.secondary].filter(Boolean).join(" \u2014 ");
+  const date = (entry.date || "").trim();
+  const detail = (entry.detail || "").trim();
+  let out = head;
+  if (date) out = out ? `${out} (${date})` : date;
+  if (detail) out = out ? `${out} \u00b7 ${detail}` : detail;
+  return out.trim();
+}
+
 function Section({
   title,
   tokens,
@@ -144,6 +165,12 @@ export function ResumePreview({
 }) {
   const tokens: DesignTokens = { ...DEFAULT_DESIGN_TOKENS, ...(tokensProp ?? {}) };
   const { contact, summary, experience, projects, education, skills } = data;
+  // Sections with at least one entry that renders to something. Mirrors
+  // resume_ops.visible_extras: an empty heading is worse than no heading,
+  // on screen and for an ATS parser.
+  const extras = (data.extras ?? [])
+    .map((s) => ({ ...s, entries: s.entries.filter(extraLine) }))
+    .filter((s) => s.entries.length > 0);
   const { leading } = DENSITY[tokens.density];
   const centred = tokens.name_align === "center";
   const accent = tokens.accent || undefined;
@@ -154,7 +181,8 @@ export function ResumePreview({
     experience.length === 0 &&
     projects.length === 0 &&
     education.length === 0 &&
-    skills.length === 0;
+    skills.length === 0 &&
+    extras.length === 0;
 
   const detailLines = [contact.email, contact.phone, contact.location].filter(Boolean);
   const bullet = "text-[10px] " + leading;
@@ -335,6 +363,16 @@ export function ResumePreview({
                 ))}
               </Section>
             )}
+
+            {extras.map((section, i) => (
+              <Section key={i} title={section.title} tokens={tokens}>
+                {section.entries.map((entry, j) => (
+                  <p key={j} className={bullet}>
+                    {extraLine(entry)}
+                  </p>
+                ))}
+              </Section>
+            ))}
           </>
         )}
       </div>

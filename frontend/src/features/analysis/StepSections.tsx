@@ -2,18 +2,19 @@ import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BulletRow, DateRangeField, Field, TextAreaField, TipsPanel } from "./fields";
 import { dateLabel } from "@/lib/dates";
-import type { CategoryKey, StructuredData } from "@/services";
+import { ExtrasEditor } from "./ExtrasEditor";
+import type { StepKey, StructuredData } from "@/services";
 
 /**
  * The editable surface for each step.
  *
- * Increment 1 deliberately edits ONLY fields that already exist in
- * resume_ops.empty_resume(): contact, summary, experience, education, skills.
- * Certifications / languages / awards / publications / custom sections and the
- * start-date / end-date / "currently work here" split are approved but land in
- * later increments, because each new section also costs two exporter renderers
- * and the preview — shipping a field the PDF silently drops would be a lie of
- * a different kind.
+ * Steps 1-4 edit the scored sections: contact, summary, experience, and the
+ * structural fields behind Format. The fifth step, "extras", edits the optional
+ * sections and is NOT scored — it renders only ExtrasEditor, with no findings
+ * or recommendation cards, because the extras category never emits any.
+ *
+ * Every section here is rendered end to end: preview, PDF, DOCX and TXT.
+ * Shipping a field the exports silently drop would be its own kind of lie.
  */
 
 type Props = {
@@ -26,10 +27,13 @@ type Props = {
 const clone = (d: StructuredData): StructuredData =>
   JSON.parse(JSON.stringify(d)) as StructuredData;
 
-export function StepSections({ step, ...props }: Props & { step: CategoryKey }) {
+export function StepSections({ step, ...props }: Props & { step: StepKey }) {
   if (step === "contact") return <ContactSection {...props} />;
   if (step === "summary") return <SummarySection {...props} />;
   if (step === "experience") return <ExperienceSection {...props} />;
+  if (step === "extras") {
+    return <ExtrasEditor data={props.data} onChange={props.onChange} />;
+  }
   return <FormatSection {...props} />;
 }
 

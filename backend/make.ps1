@@ -138,6 +138,11 @@ function Show-Help {
     Write-Host "  backend\.env is THIS directory's config and holds real secrets." -ForegroundColor DarkGray
     Write-Host "  The browser app is configured separately in frontend\.env.local." -ForegroundColor DarkGray
     Write-Host ""
+    Write-Host "AI transport (needs UNOROUTER_API_KEY in backend\.env)" -ForegroundColor Yellow
+    Write-Host "  models              which models the key can actually call"
+    Write-Host "  critic-report       score the rule critic offline"
+    Write-Host "  critic-report-llm   ... and the live LLM critic, paced for the free tier"
+    Write-Host ""
     Write-Host "Schema (app/models.py is the source of truth)" -ForegroundColor Yellow
     Write-Host "  db-push         create database + tables to match the models"
     Write-Host "  db-push-seed    ... and seed"
@@ -226,6 +231,10 @@ switch ($Target.ToLowerInvariant()) {
     'migrate-deploy' { Invoke-Cli @('migrate', 'deploy') }
     'migrate-status' { Invoke-Cli @('migrate', 'status') }
     'migrate-down'   { Invoke-Cli @('migrate', 'down') }
+
+    'models'         { Invoke-Py @('-m', 'scripts.check_model_access') }
+    'critic-report'  { Invoke-Py @('-m', 'scripts.critic_report') }
+    'critic-report-llm' { Invoke-Py @('-m', 'scripts.critic_report', '--llm', '--sleep', '60') }
 
     'test'           { Invoke-Py @('-m', 'pytest', '-q') }
     'lint'           { Invoke-Py @('-m', 'ruff', 'check', 'app', 'tests') }

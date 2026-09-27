@@ -23,13 +23,50 @@ def _steps(client, user_id, resume_id):
     return r.json()
 
 
-def test_steps_returns_four_ordered_steps(client, priya, priya_resume):
+def test_steps_returns_five_ordered_steps(client, priya, priya_resume):
     body = _steps(client, priya, priya_resume)
     assert [s["id"] for s in body["steps"]] == [
-        "contact", "summary", "experience", "format",
+        "contact", "summary", "experience", "format", "extras",
     ]
+    # The fifth step adds 0 to the denominator, so this still holds.
     assert body["max_score"] == 100
+    assert sum(s["max"] for s in body["steps"]) == 100
     assert body["resume_id"] == priya_resume
+
+
+def test_extras_step_is_optional_and_zeroed_over_the_wire(client, priya, priya_resume):
+    step = next(s for s in _steps(client, priya, priya_resume)["steps"]
+                if s["id"] == "extras")
+    assert (step["score"], step["max"], step["points_available"]) == (0, 0, 0)
+    assert step["status"] == "optional"
+    assert step["findings"] == []
+    # The internal `scored` flag must not leak into the contract.
+    assert "scored" not in step
+
+
+def test_filling_in_extras_does_not_change_the_score(client, priya):
+    """A user adding certifications must see their score stay put."""
+    rid = new_resume(client, priya, "Extras", WEAK)
+    before = _steps(client, priya, rid)
+    doc = client.get(f"/api/resumes/{rid}",
+                     headers={"X-User-Id": priya}).json()["structured_data"]
+    doc["extras"] = [{"kind": "certifications", "title": "Certifications",
+                      "entries": [{"primary": "AWS Solutions Architect",
+                                   "secondary": "AWS", "date": "2023",
+                                   "detail": ""}]}]
+    assert client.put(f"/api/resumes/{rid}/data", json={"structured_data": doc},
+                      headers={"X-User-Id": priya}).status_code == 200
+    after = _steps(client, priya, rid)
+    assert after["overall_score"] == before["overall_score"]
+    assert after["max_score"] == before["max_score"] == 100
+    assert after["points_available"] == before["points_available"]
+
+
+def test_a_legacy_resume_with_no_extras_key_still_returns_five_steps(
+    client, priya, priya_resume,
+):
+    body = _steps(client, priya, priya_resume)
+    assert len(body["steps"]) == 5
 
 
 def test_steps_work_before_any_analysis_has_been_run(client, priya):

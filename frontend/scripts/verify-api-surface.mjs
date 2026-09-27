@@ -205,7 +205,7 @@ ok(st0.max_score === 100, "steps max_score = 100", `${st0.max_score}`);
 
 const st = (await api.get(`/resumes/${BASE_ID}/analysis/steps`)).data;
 const stepIds = st.steps.map((x) => x.id);
-ok(JSON.stringify(stepIds) === JSON.stringify(["contact", "summary", "experience", "format"]), "4 steps in scoring order", stepIds.join(","));
+ok(JSON.stringify(stepIds) === JSON.stringify(["contact", "summary", "experience", "format", "extras"]), "5 steps in order, extras last", stepIds.join(","));
 ok(st.steps.every((x, i) => x.index === i), "step.index matches position");
 ok(st.overall_score === st.steps.reduce((a, x) => a + x.score, 0), "overall = sum of step scores", `${st.overall_score}`);
 ok(st.points_available === st.steps.reduce((a, x) => a + x.points_available, 0), "points_available = sum of steps");
@@ -347,6 +347,138 @@ for (const [label, make] of [
   // Lazily: an eagerly-created rejected promise is an unhandled rejection
   // before the loop reaches its await.
   await expectStatus(make(), 404, `other user ${label} -> 404`);
+}
+
+section("AI rewrite — POST /resumes/{id}/sections/{ref}/rewrite");
+{
+  // Its own resume, so this block owns every byte it asserts on.
+  const rw = (await api.post("/resumes", { title: `Rewrite probe ${Date.now()}` })).data;
+  await api.put(`/resumes/${rw.id}/data`, {
+    structured_data: {
+      contact: { name: "Jane", email: "j@x.com", phone: "555", location: "Pune", links: ["gh"] },
+      summary: { text: "" },
+      experience: [{
+        company: "Acme", role: "Platform Engineer", dates: "2020-2024",
+        // Two weak bullets: accepting a rewrite makes that bullet strong, and
+        // the rule engine rightly refuses to "improve" already-strong text.
+        // The staleness case therefore needs its own untouched bullet.
+        bullets: ["Worked on the deployment pipeline", "Helped with the monitoring stack"],
+      }],
+      skills: [{ label: "P", items: ["Python", "Terraform"] }],
+      education: [{ school: "S", degree: "BSc", dates: "2016" }],
+      projects: [],
+    },
+  });
+
+  const REF = "exp_0.bullet_0";
+  const first = (await api.post(
+    `/resumes/${rw.id}/sections/${REF}/rewrite`,
+    { finding_id: "experience.weak_verbs" },
+  )).data;
+  hasFields(first, ["id", "origin", "session_id", "status", "original_text",
+                    "suggested_text", "keywords", "reasoning"], "rewrite returns SuggestionOut");
+  ok(first.origin === "analysis", "rewrite origin=analysis", first.origin);
+  ok(first.session_id === null, "rewrite has no session", String(first.session_id));
+  ok(first.status === "pending", "rewrite is pending", first.status);
+  ok(first.original_text === "Worked on the deployment pipeline",
+     "original_text copied verbatim", first.original_text);
+  ok(Boolean(first.suggested_text?.trim()), "rewrite produced text");
+
+  const again = (await api.post(
+    `/resumes/${rw.id}/sections/${REF}/rewrite`,
+    { finding_id: "experience.weak_verbs" },
+  )).data;
+  ok(again.id === first.id, "re-clicking returns the SAME draft, not a duplicate");
+
+  const regen = (await api.post(
+    `/resumes/${rw.id}/sections/${REF}/rewrite`,
+    { finding_id: "experience.weak_verbs", regenerate: true },
+  )).data;
+  ok(regen.id !== first.id, "regenerate supersedes the previous draft");
+
+  await expectStatus(
+    api.post(`/resumes/${rw.id}/sections/experience/rewrite`, {}),
+    422, "container ref (unresolvable) -> 422");
+  await expectStatus(
+    asOther.post(`/resumes/${rw.id}/sections/${REF}/rewrite`, {}),
+    404, "other user rewrite -> 404");
+
+  // The 409 staleness guard covers analysis-origin drafts too. Do this on the
+  // SECOND bullet, before anything is accepted, so the text is still weak.
+  const stale = (await api.post(
+    `/resumes/${rw.id}/sections/exp_0.bullet_1/rewrite`,
+    { finding_id: "experience.weak_verbs" },
+  )).data;
+  const doc = (await api.get(`/resumes/${rw.id}`)).data.structured_data;
+  doc.experience[0].bullets[1] = "My own hand edit.";
+  await api.put(`/resumes/${rw.id}/data`, { structured_data: doc });
+  await expectStatus(
+    api.patch(`/suggestions/${stale.id}`, { action: "accept" }),
+    409, "stale analysis draft -> 409");
+  const kept = (await api.get(`/resumes/${rw.id}`)).data;
+  ok(kept.structured_data.experience[0].bullets[1] === "My own hand edit.",
+     "the hand edit survived the conflict");
+
+  // The draft must feed the ORDINARY suggestion lifecycle, not a second one.
+  const accepted = (await api.patch(`/suggestions/${regen.id}`, { action: "accept" })).data;
+  ok(accepted.status === "accepted", "analysis draft accepts like any suggestion", accepted.status);
+  const after = (await api.get(`/resumes/${rw.id}`)).data;
+  ok(after.structured_data.experience[0].bullets[0] === regen.suggested_text,
+     "accepting an analysis draft patches the resume");
+
+  await api.delete(`/resumes/${rw.id}`);
+}
+
+section("extras \u2014 optional sections that must never move a score");
+{
+  const ex = (await api.post("/resumes", { title: "Extras probe" })).data;
+  const doc = (await api.get(`/resumes/${ex.id}`)).data.structured_data;
+  doc.contact = { ...doc.contact, name: "Extra Tester", email: "e@example.com" };
+  doc.experience = [{
+    company: "Acme", role: "Engineer", dates: "2020-2024",
+    bullets: ["Delivered a 40% latency reduction across 3 services"],
+  }];
+  await api.put(`/resumes/${ex.id}/data`, { structured_data: doc });
+
+  const before = (await api.get(`/resumes/${ex.id}/analysis/steps`)).data;
+  ok(before.steps.length === 5, "five steps", `${before.steps.length}`);
+  const extrasStep = before.steps[4];
+  ok(extrasStep.id === "extras", "fifth step is extras", extrasStep.id);
+  ok(extrasStep.status === "optional", "extras status is 'optional'", extrasStep.status);
+  ok(extrasStep.score === 0 && extrasStep.max === 0 && extrasStep.points_available === 0,
+     "extras is zeroed on every axis");
+  ok(extrasStep.findings.length === 0, "extras emits no findings");
+  ok(!("scored" in extrasStep), "the internal `scored` flag does not leak");
+  ok(before.max_score === 100, "max_score is still 100", `${before.max_score}`);
+  ok(before.steps.reduce((t, s) => t + s.max, 0) === 100, "step maxima still sum to 100");
+
+  // The whole point of an unscored step, asserted rather than assumed.
+  doc.extras = [
+    { kind: "certifications", title: "Certifications",
+      entries: [{ primary: "AWS Solutions Architect", secondary: "Amazon",
+                  date: "2023", detail: "" }] },
+    { kind: "languages", title: "Languages",
+      entries: [{ primary: "Hindi", secondary: "Native", date: "", detail: "" }] },
+  ];
+  await api.put(`/resumes/${ex.id}/data`, { structured_data: doc });
+  const after = (await api.get(`/resumes/${ex.id}/analysis/steps`)).data;
+  ok(after.overall_score === before.overall_score,
+     "adding extras does not move overall_score",
+     `${before.overall_score} -> ${after.overall_score}`);
+  ok(after.points_available === before.points_available,
+     "adding extras does not move points_available");
+
+  const stored = (await api.get(`/resumes/${ex.id}`)).data.structured_data;
+  ok(stored.extras.length === 2, "both sections round-tripped", `${stored.extras.length}`);
+  ok(stored.extras[0].kind === "certifications" && stored.extras[1].kind === "languages",
+     "section ORDER survived the round trip");
+  ok(stored.extras[0].entries[0].date === "2023", "entry fields survived");
+
+  // Exports must carry them, or the editor is lying about what ships.
+  const txt = (await api.get(`/resumes/${ex.id}/export?format=txt`)).data;
+  ok(String(txt).includes("AWS Solutions Architect"), "extras reach the TXT export");
+
+  await api.delete(`/resumes/${ex.id}`);
 }
 
 section("delete semantics");

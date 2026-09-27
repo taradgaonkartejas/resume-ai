@@ -14,6 +14,7 @@ from pypdf import PdfReader
 
 from app.services.export_service import ExportService, _latin1
 from app.services.resume_ops import date_label, migrate, to_plain_text
+from tests.conftest import new_resume
 
 TOKEN_SETS = {
     "modern": {"font": "sans", "heading": "rule", "name_align": "left",
@@ -145,3 +146,62 @@ def test_smart_quotes_in_a_bullet_do_not_become_question_marks():
     text = _pdf_text(_svc()._render_pdf(data, TOKEN_SETS["modern"]))
     assert "?" not in text
     assert "Zero Downtime" in text
+
+
+# -------------------------------------------------------- extras exports ---
+
+_EXTRAS_DOC = {
+    "contact": {"name": "Priya Sharma", "email": "p@example.com"},
+    "summary": {"text": "Engineer."},
+    "experience": [],
+    "extras": [
+        {"kind": "certifications", "title": "Certifications",
+         "entries": [{"primary": "AWS Solutions Architect",
+                      "secondary": "Amazon", "date": "2023", "detail": ""}]},
+        {"kind": "custom", "title": "Volunteering", "entries": []},
+    ],
+}
+
+
+def _export(client, user, fmt, doc):
+    rid = new_resume(client, user, "Extras export", doc)
+    r = client.get(f"/api/resumes/{rid}/export?format={fmt}",
+                   headers={"X-User-Id": user})
+    assert r.status_code == 200, r.text
+    return r.content
+
+
+def test_txt_export_includes_extras_and_omits_the_empty_section(client, priya):
+    body = _export(client, priya, "txt", _EXTRAS_DOC).decode("utf-8")
+    assert "CERTIFICATIONS" in body
+    assert "AWS Solutions Architect" in body
+    assert "Amazon" in body and "2023" in body
+    assert "VOLUNTEERING" not in body, "an empty section must not print a heading"
+
+
+def test_docx_export_includes_extras(client, priya):
+    import io
+
+    import docx
+
+    document = docx.Document(io.BytesIO(_export(client, priya, "docx", _EXTRAS_DOC)))
+    text = "\n".join(p.text for p in document.paragraphs)
+    assert "Certifications" in text
+    assert "AWS Solutions Architect" in text
+    assert "Volunteering" not in text
+
+
+def test_pdf_export_succeeds_and_grows_with_extras(client, priya):
+    """fpdf2 output is not greppable, so assert the bytes respond to content."""
+    without = dict(_EXTRAS_DOC, extras=[])
+    small = _export(client, priya, "pdf", without)
+    large = _export(client, priya, "pdf", _EXTRAS_DOC)
+    assert small[:4] == b"%PDF" and large[:4] == b"%PDF"
+    assert len(large) > len(small)
+
+
+def test_a_resume_with_no_extras_key_still_exports(client, priya):
+    legacy = {"contact": {"name": "Legacy"}, "summary": {"text": "x"},
+              "experience": []}
+    for fmt in ("txt", "docx", "pdf"):
+        assert _export(client, priya, fmt, legacy)

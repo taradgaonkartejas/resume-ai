@@ -75,6 +75,19 @@ DEMO = {
     "education": [{"school": "COEP Pune", "degree": "B.Tech Computer Engineering", "dates": "2015 - 2019"}],
     "skills": [{"label": "Infrastructure", "items": ["Kubernetes", "Terraform", "AWS"]},
                {"label": "Languages", "items": ["Python", "Go", "Bash"]}],
+    "extras": [
+        {"kind": "certifications", "title": "Certifications", "entries": [
+            {"primary": "AWS Certified Solutions Architect – Associate",
+             "secondary": "Amazon Web Services", "date": "2023", "detail": ""},
+            {"primary": "Certified Kubernetes Administrator",
+             "secondary": "CNCF", "date": "2022", "detail": ""}]},
+        {"kind": "languages", "title": "Languages", "entries": [
+            {"primary": "English", "secondary": "Professional", "date": "", "detail": ""},
+            {"primary": "Hindi", "secondary": "Native", "date": "", "detail": ""}]},
+        {"kind": "awards", "title": "Awards & Honors", "entries": [
+            {"primary": "Engineering Excellence Award", "secondary": "Meridian Cloud",
+             "date": "2023", "detail": ""}]},
+    ],
 }
 
 RESUMES: dict[str, dict] = {}
@@ -113,6 +126,21 @@ def apply_target_ref(resume, target_ref, text):
                 rows[i]["bullets"][j] = text
     resume["structured_data"] = data
     resume["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+
+def read_target_ref(resume, target_ref):
+    """Current text at a target_ref, or None when the path does not resolve."""
+    data = resume.get("structured_data") or {}
+    if target_ref == "summary.text":
+        return (data.get("summary") or {}).get("text")
+    m = re.fullmatch(r"(exp|prj)_(\d+)\.bullet_(\d+)", target_ref)
+    if m:
+        key = "experience" if m.group(1) == "exp" else "projects"
+        i, j = int(m.group(2)), int(m.group(3))
+        rows = data.get(key) or []
+        if i < len(rows) and j < len(rows[i].get("bullets") or []):
+            return rows[i]["bullets"][j]
+    return None
 
 
 def record_version(resume_id, label):
@@ -282,6 +310,34 @@ def normalise_entry(entry):
     return out
 
 
+EXTRA_TITLES = {
+    "certifications": "Certifications", "languages": "Languages",
+    "awards": "Awards & Honors", "publications": "Publications",
+    "references": "References", "custom": "Additional Information",
+}
+_EXTRA_FIELDS = ("primary", "secondary", "date", "detail")
+
+
+def normalise_extra(section):
+    """Mirrors resume_ops.normalise_extra."""
+    if not isinstance(section, dict):
+        return {"kind": "custom", "title": EXTRA_TITLES["custom"], "entries": []}
+    kind = section.get("kind")
+    if kind not in EXTRA_TITLES:
+        kind = "custom"
+    title = str(section.get("title") or "").strip() or EXTRA_TITLES[kind]
+    raw = section.get("entries")
+    entries = []
+    for item in raw if isinstance(raw, list) else []:
+        if isinstance(item, str):
+            entries.append({"primary": item.strip(), "secondary": "",
+                            "date": "", "detail": ""})
+        elif isinstance(item, dict):
+            entries.append({f: str(item.get(f) or "").strip()
+                            for f in _EXTRA_FIELDS})
+    return {"kind": kind, "title": title, "entries": entries}
+
+
 def migrate(data):
     if not isinstance(data, dict):
         return data
@@ -290,6 +346,12 @@ def migrate(data):
         entries = out.get(section) or []
         if isinstance(entries, list):
             out[section] = [normalise_entry(e) for e in entries]
+    extras = out.get("extras")
+    out["extras"] = [
+        normalise_extra(x)
+        for x in (extras if isinstance(extras, list) else [])
+        if isinstance(x, dict)
+    ]
     return out
 
 
@@ -309,6 +371,17 @@ STEP_META = [
     ("format", 20, "Structure & ATS Readability",
      "Length, required sections, and whether a parser can read it."),
 ]
+
+# Navigable but unscored, mirroring the `scored: False` spec in heuristics.py.
+# A literal dict on purpose: reimplementing the logic is how mock and real drift.
+EXTRAS_STEP = {
+    "id": "extras",
+    "title": "Credentials & Extras",
+    "description": "Certifications, languages, awards and any section you want "
+                   "to add. Optional — these do not affect your score.",
+    "score": 0, "max": 0, "points_available": 0, "finding_count": 0,
+    "findings": [], "status": "optional",
+}
 
 ACTION_VERBS = {
     # Leadership / ownership
@@ -391,6 +464,66 @@ def _plain_text(d):
     for g in d.get("skills", []) or []:
         parts += list(g.get("items", []))
     return " ".join(x for x in parts if x)
+
+
+def extra_entry_line(e):
+    """Mirrors resume_ops.extra_entry_line."""
+    head = " — ".join(x for x in (e.get("primary"), e.get("secondary")) if x)
+    date = (e.get("date") or "").strip()
+    detail = (e.get("detail") or "").strip()
+    if date:
+        head = f"{head} ({date})" if head else date
+    if detail:
+        head = f"{head} · {detail}" if head else detail
+    return head.strip()
+
+
+def visible_extras(d):
+    out = []
+    for section in d.get("extras") or []:
+        entries = [e for e in section.get("entries", []) if extra_entry_line(e)]
+        if entries:
+            out.append({**section, "entries": entries})
+    return out
+
+
+def render_txt(d):
+    """A real TXT export, mirroring resume_ops.to_plain_text.
+
+    Was a canned b"Mock export" blob, which meant every export assertion the
+    probe could make was about magic bytes rather than content -- so the mock
+    could not have caught a renderer that dropped a whole section.
+    """
+    lines = []
+    c = d.get("contact", {}) or {}
+    if c.get("name"):
+        lines.append(c["name"])
+    detail = " | ".join(x for x in (c.get("email"), c.get("phone"),
+                                    c.get("location")) if x)
+    if detail:
+        lines.append(detail)
+    if (d.get("summary") or {}).get("text"):
+        lines += ["", "SUMMARY", d["summary"]["text"]]
+    if d.get("experience"):
+        lines += ["", "EXPERIENCE"]
+        for e in d["experience"]:
+            head = " — ".join(x for x in (e.get("company"), e.get("role")) if x)
+            lines.append(f"{head} {date_label(e)}".strip())
+            lines += [f"  - {b}" for b in e.get("bullets", [])]
+    if d.get("education"):
+        lines += ["", "EDUCATION"]
+        for e in d["education"]:
+            lines.append(" — ".join(x for x in (e.get("school"), e.get("degree"),
+                                                date_label(e)) if x))
+    if d.get("skills"):
+        lines += ["", "SKILLS"]
+        for g in d["skills"]:
+            items = ", ".join(g.get("items", []))
+            lines.append(f"{g.get('label')}: {items}" if g.get("label") else items)
+    for section in visible_extras(d):
+        lines += ["", section["title"].upper()]
+        lines += [extra_entry_line(e) for e in section["entries"]]
+    return "\n".join(lines)
 
 
 def _exp_bullets(d):
@@ -577,6 +710,7 @@ def steps_for(r):
             "status": "clear" if not fs else ("attention" if avail >= 5 else "minor"),
             "findings": fs,
         })
+    steps.append({**EXTRAS_STEP, "index": len(steps)})
     return {
         "resume_id": r["id"],
         "overall_score": sum(s["score"] for s in steps),
@@ -677,7 +811,7 @@ class H(BaseHTTPRequestHandler):
                     f"{fmt}: expected one of ['docx', 'pdf', 'txt']"})
             # Real magic bytes: the UI sniffs these when saving a blob.
             blobs = {"pdf": b"%PDF-1.4\n% mock\n", "docx": b"PK\x03\x04mock",
-                     "txt": b"Mock export\n"}
+                     "txt": render_txt(r.get("structured_data") or {}).encode()}
             types = {"pdf": "application/pdf", "txt": "text/plain",
                      "docx": "application/vnd.openxmlformats-officedocument."
                              "wordprocessingml.document"}
@@ -769,7 +903,74 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/resumes":
             uid = self._uid()
             title = json.loads(raw or b"{}").get("title") or "Untitled resume"
-            return self._send(201, new_record(uid, title))
+            rec = new_record(uid, title)
+            # Matches ResumeService.create_blank: a resume made in the editor
+            # has no uploaded file, so it has no storage_key -- which is what
+            # makes /reparse a 422 for it.
+            rec["storage_key"] = ""
+            return self._send(201, rec)
+
+        # Mirrors POST /resumes/{id}/reparse. The mock has no stored file, so
+        # it reproduces the CONTRACT (owner scoping, 422 when the resume was
+        # created in the editor rather than uploaded) rather than re-running a
+        # parser it does not have.
+        # Mirrors POST /resumes/{id}/sections/{ref}/rewrite. The mock has no
+        # LLM, so it reproduces the CONTRACT: a pending analysis-origin
+        # Suggestion with session_id=None, 422 on an unresolvable ref, and one
+        # draft per ref unless regenerate is set.
+        m = re.fullmatch(r"/api/resumes/([0-9a-f-]+)/sections/([^/]+)/rewrite", p)
+        if m:
+            rid, ref = m.group(1), urllib.parse.unquote(m.group(2))
+            r = RESUMES.get(rid)
+            if r and r["user_id"] != self._uid():
+                r = None
+            if not r:
+                return self._send(404, {"detail": "Resume not found"})
+            current = read_target_ref(r, ref)
+            if current is None:
+                return self._send(422, {"detail": f"{ref}: nothing to rewrite there"})
+
+            body = json.loads(raw or b"{}")
+            bucket = SUGGESTIONS.setdefault(
+                f"analysis:{rid}", {"active": [], "matched": [], "rejected": []})
+            existing = next(
+                (x for x in bucket["active"] if x["target_ref"] == ref), None)
+            if existing and not body.get("regenerate"):
+                return self._send(201, existing)
+            if existing:
+                bucket["active"].remove(existing)
+                existing["status"] = "rejected"
+                bucket["rejected"].append(existing)
+
+            improved = (current or "").strip()
+            improved = ("Delivered " + improved[0].lower() + improved[1:]
+                        if improved else "Experienced professional.")
+            sug = {
+                "id": str(uuid.uuid4()), "resume_id": rid, "session_id": None,
+                "origin": "analysis", "section": ref.split(".")[0],
+                "target_ref": ref, "placement": "",
+                "original_text": current or "", "suggested_text": improved,
+                "edited_text": "", "keywords": [], "reasoning":
+                    "Opened with a stronger verb.",
+                "status": "pending", "grounded": True, "critic_notes": "",
+                "revisions": 0,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            bucket["active"].append(sug)
+            return self._send(201, sug)
+
+        m = re.fullmatch(r"/api/resumes/([0-9a-f-]+)/reparse", p)
+        if m:
+            r = RESUMES.get(m.group(1))
+            if r and r["user_id"] != self._uid():
+                r = None
+            if not r:
+                return self._send(404, {"detail": "Resume not found"})
+            if not (r.get("storage_key") or "").strip():
+                return self._send(422, {"detail":
+                    "This resume was created in the editor, not uploaded, so "
+                    "there is no original file to re-read."})
+            return self._send(200, r)
 
         m = re.fullmatch(r"/api/resumes/([0-9a-f-]+)/fork", p)
         if m:
@@ -941,6 +1142,30 @@ class H(BaseHTTPRequestHandler):
                 for sug in list(buckets["active"]):
                     if sug["id"] != m.group(1):
                         continue
+                    # edit rewrites the SUGGESTION and leaves it pending; it
+                    # does not touch the resume. Mirrors SuggestionService.act.
+                    if action == "edit":
+                        edited = (body.get("edited_text") or "").strip()
+                        if not edited:
+                            return self._send(422, {"detail":
+                                "edited_text is required for edit"})
+                        sug["edited_text"] = edited
+                        sug["status"] = "pending"
+                        return self._send(200, sug)
+
+                    tgt = RESUMES.get(sug["resume_id"])
+                    if action == "accept" and tgt is not None:
+                        # 409 when the text moved on since generation, or
+                        # accepting would silently destroy a later hand-edit.
+                        current = read_target_ref(tgt, sug["target_ref"])
+                        if current is not None and current != sug.get("original_text"):
+                            return self._send(409, {"detail":
+                                "This text changed after the suggestion was "
+                                "generated, so accepting it would overwrite "
+                                "the newer version. Reject it and re-run "
+                                "tailoring to get a suggestion for the "
+                                "current text."})
+
                     buckets["active"].remove(sug)
                     if action == "reject":
                         sug["status"] = "rejected"
@@ -949,13 +1174,10 @@ class H(BaseHTTPRequestHandler):
                         sug["status"] = "accepted"
                         # Really patch the resume: a mock that only flips a
                         # status lets "accept does nothing" ship unnoticed.
-                        tgt = RESUMES.get(sug["resume_id"])
                         text = sug.get("edited_text") or sug["suggested_text"]
                         if tgt is not None:
                             apply_target_ref(tgt, sug["target_ref"], text)
                         record_version(sug["resume_id"], "Accepted suggestion")
-                        if action == "edit":
-                            sug["edited_text"] = body.get("edited_text", "")
                         buckets["matched"].append(sug)
                         for sess in SESSIONS.get(sug["resume_id"], []):
                             if sess["id"] == sid:

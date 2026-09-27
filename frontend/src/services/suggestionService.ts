@@ -29,6 +29,27 @@ export const suggestionService = {
       action: "edit",
       edited_text: editedText,
     }),
+
+  /**
+   * POST /api/resumes/{id}/sections/{target_ref}/rewrite
+   *
+   * Drafts an AI fix for one finding and returns an ordinary pending
+   * SuggestionOut, so everything above applies to it unchanged. The server
+   * runs the critic before persisting, so a 422 here means the draft was
+   * rejected as ungrounded and nothing was stored.
+   *
+   * target_ref contains dots but never slashes, so it needs no encoding
+   * beyond the usual.
+   */
+  rewrite: (
+    resumeId: string,
+    targetRef: string,
+    opts: { findingId?: string; regenerate?: boolean } = {},
+  ) =>
+    http.post<SuggestionOut>(
+      `/resumes/${resumeId}/sections/${encodeURIComponent(targetRef)}/rewrite`,
+      { finding_id: opts.findingId ?? "", regenerate: opts.regenerate ?? false },
+    ),
 };
 
 /** The text actually applied: the user's edit when present, else the LLM's

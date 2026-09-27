@@ -1,7 +1,7 @@
 # ResumeAI Backend
 
 FastAPI + SQLAlchemy 2.0, three layers: **controller → service → repository**.
-28 operations, 152 tests passing, ruff clean.
+30 operations, 437 tests passing, ruff clean. Critic: 13/13 recall vs the rule engine's 5/13.
 
 ## Quick start
 
@@ -227,7 +227,7 @@ See [Database](#database) for the full command set.
 
 ```bash
 make run             # uvicorn --reload on 0.0.0.0:8000
-make test            # 57 tests
+make test            # 437 tests
 make lint            # ruff
 ```
 
@@ -248,7 +248,7 @@ something looks wrong:
 | `users` | `5` | `0` → not seeded yet; `-1` → query failed |
 
 `llm_configured: false` is normal and fully supported: every agent falls back
-to its deterministic path, which is why all 57 tests pass without an API key.
+to its deterministic path, which is why all 437 tests pass without an API key.
 
 ## Layout
 
@@ -708,7 +708,7 @@ make db-push-seed
 
 `app/ai/` is built and wired into `analysis_service`, `tailoring_service` and
 `chat_service`. It runs with or without an LLM key: every agent has a
-deterministic fallback, which is why all 57 tests pass with
+deterministic fallback, which is why all 437 tests pass with
 `llm_configured: false`.
 
 | Module | Role |

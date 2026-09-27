@@ -320,6 +320,37 @@ export function useSuggestionAction(resumeId: string | null, sessionId: string |
   });
 }
 
+/**
+ * "Rewrite with AI" on a recommendation.
+ *
+ * Deliberately NOT optimistic: the server runs the critic before it persists,
+ * so there is nothing truthful to show until it answers. Faking a draft and
+ * then retracting it on a 422 would be worse than the wait.
+ */
+export function useRewriteSection(resumeId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      targetRef,
+      findingId,
+      regenerate,
+    }: {
+      targetRef: string;
+      findingId?: string;
+      regenerate?: boolean;
+    }) => {
+      if (!resumeId) throw new Error("No resume selected");
+      return suggestionService.rewrite(resumeId, targetRef, { findingId, regenerate });
+    },
+    onSuccess: () => {
+      // The draft is pending, so no score has moved yet. Only the suggestion
+      // lists need refreshing; invalidating analysis here would re-render the
+      // whole stepper under the user mid-read.
+      if (resumeId) qc.invalidateQueries({ queryKey: keys.tailor(resumeId) });
+    },
+  });
+}
+
 /* ---------------------------------------------------------------- chat --- */
 
 /**

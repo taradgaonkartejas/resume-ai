@@ -39,6 +39,12 @@ def empty_resume() -> dict:
         "projects": [],
         "education": [],
         "skills": [],
+        # Optional sections (certifications, languages, awards, publications,
+        # references, or anything the user names). One generic shape with
+        # preset-supplied labels, so preview/export/editor each gain ONE code
+        # path rather than one per section type. Deliberately a list: order is
+        # user-controlled and must survive round-tripping.
+        "extras": [],
     }
 
 
@@ -143,6 +149,112 @@ def date_label(entry: dict) -> str:
     return (entry.get("dates") or "").strip()
 
 
+# The six presets. `labels` drives BOTH the editor inputs and the renderers:
+# a field whose label is "" is not part of that section type and is never shown.
+# This is what keeps a generic four-field entry from feeling generic.
+EXTRA_PRESETS: dict[str, dict] = {
+    "certifications": {
+        "title": "Certifications",
+        "labels": {"primary": "Certification", "secondary": "Issuer",
+                   "date": "Year", "detail": ""},
+    },
+    "languages": {
+        "title": "Languages",
+        "labels": {"primary": "Language", "secondary": "Fluency",
+                   "date": "", "detail": ""},
+    },
+    "awards": {
+        "title": "Awards & Honors",
+        "labels": {"primary": "Award", "secondary": "Awarded by",
+                   "date": "Year", "detail": ""},
+    },
+    "publications": {
+        "title": "Publications",
+        "labels": {"primary": "Title", "secondary": "Venue / journal",
+                   "date": "Year", "detail": "Link"},
+    },
+    "references": {
+        "title": "References",
+        "labels": {"primary": "Name", "secondary": "Title & company",
+                   "date": "", "detail": "Email / phone"},
+    },
+    "custom": {
+        "title": "Additional Information",
+        "labels": {"primary": "Item", "secondary": "Detail",
+                   "date": "", "detail": ""},
+    },
+}
+
+_EXTRA_FIELDS = ("primary", "secondary", "date", "detail")
+
+
+def empty_extra_entry() -> dict:
+    return {"primary": "", "secondary": "", "date": "", "detail": ""}
+
+
+def normalise_extra(section: dict) -> dict:
+    """Upcast one extras section to the current shape.
+
+    Unknown `kind` values fall back to "custom" rather than being dropped: a
+    section the user typed is data, and silently discarding it would be the
+    worst possible failure mode for a document editor.
+    """
+    if not isinstance(section, dict):
+        return {"kind": "custom", "title": EXTRA_PRESETS["custom"]["title"],
+                "entries": []}
+
+    kind = section.get("kind")
+    if kind not in EXTRA_PRESETS:
+        kind = "custom"
+
+    title = str(section.get("title") or "").strip() or EXTRA_PRESETS[kind]["title"]
+
+    raw = section.get("entries")
+    entries = []
+    for item in raw if isinstance(raw, list) else []:
+        if isinstance(item, str):
+            # Tolerate a bare list of strings -- that is what a naive importer
+            # or a hand-edited JSON file produces.
+            entries.append({**empty_extra_entry(), "primary": item.strip()})
+        elif isinstance(item, dict):
+            entries.append({f: str(item.get(f) or "").strip() for f in _EXTRA_FIELDS})
+
+    return {"kind": kind, "title": title, "entries": entries}
+
+
+def extra_entry_line(entry: dict) -> str:
+    """One extras entry as a single display line.
+
+    The single formatter shared by TXT, DOCX and PDF, so the three exports can
+    never drift into three different renderings of the same data.
+    """
+    head = " \u2014 ".join(
+        x for x in (entry.get("primary"), entry.get("secondary")) if x
+    )
+    date = (entry.get("date") or "").strip()
+    detail = (entry.get("detail") or "").strip()
+    if date:
+        head = f"{head} ({date})" if head else date
+    if detail:
+        head = f"{head} \u00b7 {detail}" if head else detail
+    return head.strip()
+
+
+def visible_extras(data: dict) -> list[dict]:
+    """Extras sections that have at least one non-empty entry.
+
+    An empty section is stored (the user is mid-edit) but never rendered -- a
+    stray heading with nothing under it is worse than no heading at all,
+    on screen and for an ATS parser.
+    """
+    out = []
+    for section in data.get("extras") or []:
+        entries = [e for e in section.get("entries", []) if extra_entry_line(e)]
+        if entries:
+            out.append({**section, "entries": entries})
+    return out
+
+
 def normalise_entry(entry: dict) -> dict:
     """Upcast one entry in place-ish and refresh its derived `dates` mirror."""
     if not isinstance(entry, dict):
@@ -207,6 +319,17 @@ def migrate(data: dict) -> dict:
         entries = out.get(section) or []
         if isinstance(entries, list):
             out[section] = [normalise_entry(e) for e in entries]
+
+    extras = out.get("extras")
+    # Non-dict junk is DROPPED rather than upcast into a phantom empty section.
+    # A section the user added but has not filled in yet is a dict and survives;
+    # a stray string is malformed data and materialising a titled empty block
+    # for it would put something on screen the user never created.
+    out["extras"] = [
+        normalise_extra(x)
+        for x in (extras if isinstance(extras, list) else [])
+        if isinstance(x, dict)
+    ]
 
     return out
 
@@ -346,5 +469,9 @@ def to_plain_text(data: dict) -> str:
             label = group.get("label", "")
             items = ", ".join(group.get("items", []))
             lines.append(f"{label}: {items}" if label else items)
+
+    for section in visible_extras(data):
+        lines += ["", section["title"].upper()]
+        lines += [extra_entry_line(e) for e in section["entries"]]
 
     return "\n".join(lines)

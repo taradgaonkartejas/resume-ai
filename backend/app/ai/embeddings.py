@@ -37,8 +37,8 @@ def _tokenise(text: str) -> list[str]:
 
 
 def embed(text: str) -> list[float]:
-    """Remote when configured, local otherwise or on failure."""
-    if llm.is_configured():
+    """Local by default; remote only when explicitly enabled."""
+    if settings.embeddings_remote and llm.is_configured():
         try:
             return llm.embed_remote([text])[0]
         except Exception as exc:  # noqa: BLE001 — degrade, never fail a request
@@ -49,7 +49,7 @@ def embed(text: str) -> list[float]:
 def embed_many(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
-    if llm.is_configured():
+    if settings.embeddings_remote and llm.is_configured():
         try:
             return llm.embed_remote(texts)
         except Exception as exc:  # noqa: BLE001

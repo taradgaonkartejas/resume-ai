@@ -10,7 +10,7 @@ import copy
 
 import pytest
 
-from app.services import heuristics
+from app.services import heuristics, resume_ops
 
 
 def _resume(**over) -> dict:
@@ -201,13 +201,53 @@ def test_target_refs_resolve_or_name_a_section():
 # ----------------------------------------------------------------- steps ---
 def test_build_steps_covers_every_category_in_order():
     steps = heuristics.build_steps(_resume())
-    assert [s["id"] for s in steps] == ["contact", "summary", "experience", "format"]
+    assert [s["id"] for s in steps] == [
+        "contact", "summary", "experience", "format", "extras",
+    ]
     for i, s in enumerate(steps):
         assert s["index"] == i
         assert s["title"] and s["description"]
-        assert s["max"] == heuristics.WEIGHTS[s["id"]]
         assert s["finding_count"] == len(s["findings"])
         assert s["points_available"] == sum(f["points"] for f in s["findings"])
+        if s["id"] == "extras":
+            continue
+        assert s["max"] == heuristics.WEIGHTS[s["id"]]
+
+
+def test_extras_step_is_navigable_but_carries_no_points():
+    """It exists in the flow and is never scored -- both halves matter."""
+    step = next(s for s in heuristics.build_steps(_resume()) if s["id"] == "extras")
+    assert step["score"] == 0 and step["max"] == 0
+    assert step["points_available"] == 0 and step["finding_count"] == 0
+    assert step["findings"] == []
+    # NOT "clear": a green tick would claim completion for a step nobody opened.
+    assert step["status"] == "optional"
+    assert "extras" not in heuristics.WEIGHTS
+
+
+def test_extras_never_emit_findings_however_full_or_empty():
+    for data in (_resume(), resume_ops.empty_resume()):
+        rich = dict(data, extras=[{"kind": "certifications", "title": "Certifications",
+                                   "entries": [{"primary": "AWS", "secondary": "",
+                                                "date": "", "detail": ""}]}])
+        for doc in (data, rich):
+            findings = heuristics.score_resume(doc)["findings"]
+            assert not [f for f in findings if f["category"] == "extras"]
+
+
+def test_adding_extras_cannot_move_the_score():
+    """The whole point of an unscored step. Asserted, not assumed."""
+    base = _resume()
+    before = heuristics.score_resume(base)["overall_score"]
+    loaded = resume_ops.migrate(dict(base, extras=[
+        {"kind": "certifications", "title": "Certifications",
+         "entries": [{"primary": "AWS Solutions Architect", "secondary": "AWS",
+                      "date": "2023", "detail": ""}]},
+        {"kind": "languages", "title": "Languages",
+         "entries": [{"primary": "Hindi", "secondary": "Native",
+                      "date": "", "detail": ""}]},
+    ]))
+    assert heuristics.score_resume(loaded)["overall_score"] == before
 
 
 def test_step_status_reflects_findings():
@@ -229,3 +269,67 @@ def test_steps_reuse_a_supplied_score_without_recomputing():
     scored = heuristics.score_resume(data)
     steps = heuristics.build_steps(data, scored)
     assert sum(s["score"] for s in steps) == scored["overall_score"]
+
+
+# --------------------------------------------- every rewrite ref must resolve
+def test_every_rewrite_finding_points_at_resolvable_text():
+    """An AI action on an unresolvable ref would 422 on every click.
+
+    `experience.no_bullets` used to declare action="rewrite" with
+    target_ref="experience", which is a container. resolve() raises on it.
+    """
+    from app.services import resume_ops
+    from app.services.heuristics import (
+        _score_contact,
+        _score_experience,
+        _score_format,
+        _score_summary,
+    )
+    from app.services.parsing import empty_resume
+
+    samples = []
+
+    blank = empty_resume()
+    blank["contact"] = {"name": "", "email": "bad", "phone": "", "location": "", "links": []}
+    blank["summary"] = {"text": ""}
+    blank["experience"] = [{"company": "Acme", "role": "Eng", "dates": "", "bullets": []}]
+    samples.append(blank)
+
+    thin = empty_resume()
+    thin["contact"] = {
+        "name": "Jane", "email": "j@x.com", "phone": "555-0100",
+        "location": "Pune", "links": ["gh"],
+    }
+    thin["summary"] = {"text": "Engineer who worked on things for a while in roles."}
+    thin["experience"] = [
+        {
+            "company": "Acme", "role": "Eng", "dates": "2020-2024",
+            "bullets": ["Worked on the platform", "Helped with deploys " + ("word " * 50)],
+        }
+    ]
+    thin["skills"] = [{"label": "P", "items": ["Python"]}]
+    thin["education"] = [{"school": "S", "degree": "B", "dates": ""}]
+    samples.append(thin)
+
+    checked = 0
+    for data in samples:
+        for scorer in (_score_contact, _score_summary, _score_experience, _score_format):
+            for finding in scorer(data)[1]:
+                if finding.action != "rewrite":
+                    continue
+                checked += 1
+                assert resume_ops.exists(data, finding.target_ref), (
+                    f"{finding.id} has action='rewrite' but target_ref "
+                    f"{finding.target_ref!r} does not resolve"
+                )
+    assert checked >= 6, f"expected several rewrite findings, saw {checked}"
+
+
+def test_no_bullets_has_no_ai_action():
+    from app.services.heuristics import _score_experience
+    from app.services.parsing import empty_resume
+
+    data = empty_resume()
+    data["experience"] = [{"company": "Acme", "role": "Eng", "dates": "", "bullets": []}]
+    found = [f for f in _score_experience(data)[1] if f.id == "experience.no_bullets"]
+    assert found and found[0].action == ""

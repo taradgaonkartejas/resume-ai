@@ -70,6 +70,21 @@ def get_resume(resume_id: uuid.UUID, user_id: CurrentUser, svc: ResumeSvc):
     return svc.get(resume_id, user_id)
 
 
+@router.post("/resumes/{resume_id}/reparse", response_model=ResumeOut)
+def reparse_resume(
+    resume_id: uuid.UUID,
+    user_id: CurrentUser,
+    parser: ParseSvc,
+):
+    """Re-read the originally uploaded file with the current parser.
+
+    Parser fixes do not retroactively repair resumes that were already parsed.
+    Discards manual edits, but records a version first so they are one undo
+    away.
+    """
+    return parser.reparse(resume_id, user_id)
+
+
 @router.get("/resumes/{resume_id}/parse-status", response_model=ParseStatusOut)
 def parse_status(resume_id: uuid.UUID, user_id: CurrentUser, svc: ResumeSvc):
     return svc.parse_status(resume_id, user_id)

@@ -191,6 +191,14 @@ class SuggestionBuckets(BaseModel):
     rejected: list[SuggestionOut]
 
 
+class RewriteRequest(BaseModel):
+    """Body for POST /resumes/{id}/sections/{ref}/rewrite. All optional."""
+
+    finding_id: str = ""
+    # Supersede the existing pending draft for this ref instead of returning it.
+    regenerate: bool = False
+
+
 class SuggestionAction(BaseModel):
     action: Literal["accept", "reject", "edit"]
     edited_text: str | None = None

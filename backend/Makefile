@@ -21,7 +21,7 @@ PY := $(shell \
 
 .PHONY: help up down logs ps doctor which-python env env-file env-update db-push db-status db-seed db-reset \
         db-inspect db-sql db-create db-drop migrate migrate-deploy migrate-status \
-        migrate-down test lint run
+        migrate-down test lint run models critic-report critic-report-llm
 
 help:
 	@echo "Services (docker compose, run from the repo root)"
@@ -56,6 +56,11 @@ help:
 	@echo "  make migrate-down       roll back one revision"
 	@echo ""
 	@echo "  make test / make lint / make run"
+	@echo ""
+	@echo "AI transport (needs UNOROUTER_API_KEY in backend/.env)"
+	@echo "  make models              which models the key can actually call"
+	@echo "  make critic-report       score the rule critic offline"
+	@echo "  make critic-report-llm   ... and the live LLM critic, paced for the free tier"
 
 # `up` waits on db only: a bare --wait fails when the one-shot minio-init exits.
 up:
@@ -142,6 +147,20 @@ test:
 
 lint:
 	$(PY) -m ruff check app tests
+
+# Answers "which models can this key actually call?" -- listing a model is not
+# the same as being entitled to it, so this makes one real call per model.
+models:
+	$(PY) -m scripts.check_model_access
+
+critic-report:
+	$(PY) -m scripts.critic_report
+
+# --sleep because the free tier allows one request per minute per model per
+# account: an unpaced run throttles and every case degrades to the rule
+# engine, which once produced a confident and completely false quality verdict.
+critic-report-llm:
+	$(PY) -m scripts.critic_report --llm --sleep 60
 
 run:
 	$(PY) -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000

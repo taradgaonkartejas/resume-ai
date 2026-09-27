@@ -105,8 +105,22 @@ export function Workspace() {
       {/* ---------------- body ---------------- */}
       {/* Chat is a fixed, narrower column and the PREVIEW takes the slack:
           chat lines past ~70 characters are hard to scan, and the resume is
-          the thing that benefits from extra width. */}
-      <main className="grid min-h-0 flex-1 grid-cols-[340px_1fr] xl:grid-cols-[340px_380px_1fr]">
+          the thing that benefits from extra width.
+
+          The left column is ~460px rather than 340px because it now hosts the
+          revision card — original text, the revised text, a REASONING block
+          and three buttons. That does not fit in 340px without wrapping the
+          buttons onto their own line.
+
+          Consequence, accepted deliberately: the three-column layout starts at
+          2xl (1536px) instead of xl (1280px). Between those widths you get a
+          wide Analysis pane plus chat, and the live preview hides — it is
+          already hidden below 1280px, so this moves an existing boundary
+          rather than introducing one. */}
+      <main
+        className="grid min-h-0 flex-1 grid-cols-[minmax(440px,1fr)_1fr]
+                   2xl:grid-cols-[minmax(460px,0.95fr)_minmax(380px,0.85fr)_minmax(0,1.2fr)]"
+      >
         {/* left: the two working modes */}
         <aside className="flex min-h-0 flex-col border-r border-line-soft bg-surface-1">
           <div className="flex shrink-0 items-center gap-1 border-b border-line-soft px-3 pt-2">
@@ -145,9 +159,11 @@ export function Workspace() {
         {/* centre: AI chat */}
         <ChatPane resumeId={resumeId} />
 
-        {/* right: live preview. Hidden below xl -- three columns under
-            ~1280px leaves all three too narrow to use. */}
-        <section className="hidden min-h-0 flex-col xl:flex">
+        {/* right: live preview. Hidden below 2xl, and that breakpoint MUST
+            match the grid's third column above — showing this section while
+            the grid still has two columns would stack it into the chat
+            column instead of beside it. */}
+        <section className="hidden min-h-0 flex-col 2xl:flex">
           <div className="flex shrink-0 items-center gap-2 border-b border-line-soft bg-surface-1 px-4 py-2">
             <span className="text-xs text-content-muted">Live preview</span>
             <button

@@ -263,8 +263,18 @@ def _make_tailor_graph(store: VectorStore | None, max_revisions: int):
         data = state.get("structured_data") or {}
         approved: list = []
         rejected: list = []
-        for draft in state.get("drafts") or []:
-            outcome = agents.review_draft(draft, data)
+        degraded = 0
+        used_llm = False
+        drafts = list(state.get("drafts") or [])
+        # One batched call for every draft: the free tier allows one request
+        # per minute per model per account, so per-draft calls guarantee a
+        # throttled -- and therefore silently rule-based -- critic.
+        for draft, outcome in zip(
+            drafts, agents.review_batch(drafts, data), strict=True
+        ):
+            if outcome.status == "degraded":
+                degraded += 1
+            used_llm = used_llm or outcome.used_llm
             verdict = outcome.value
             if verdict.approved:
                 approved.append({**draft, "grounded": True, "critic_notes": ""})
@@ -277,6 +287,13 @@ def _make_tailor_graph(store: VectorStore | None, max_revisions: int):
                         "severity": verdict.severity,
                     }
                 )
+        if degraded:
+            logger.warning(
+                "Critic degraded to the rule engine for %d of %d draft(s); "
+                "fabrication checking is weaker than normal",
+                degraded,
+                len(state.get("drafts") or []),
+            )
         return {
             "approved": approved,
             "rejected": rejected,
@@ -284,6 +301,13 @@ def _make_tailor_graph(store: VectorStore | None, max_revisions: int):
             "trace": [
                 {
                     "node": "CriticReview",
+                    # agent + status so _record() writes an agent_runs row --
+                    # a degraded critic has to be visible in /admin/agent-runs,
+                    # not only in a log line nobody reads.
+                    "agent": "critic",
+                    "status": "degraded" if degraded else "ok",
+                    "used_llm": used_llm,
+                    "degraded": degraded,
                     "approved": len(approved),
                     "rejected": len(rejected),
                     "round": state.get("revision_round", 0) + 1,

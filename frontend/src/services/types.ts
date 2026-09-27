@@ -134,6 +134,29 @@ export interface SkillGroup {
   items: string[];
 }
 
+/** The six optional-section presets. `custom` is a user-titled section. */
+export type ExtraKind =
+  | "certifications" | "languages" | "awards"
+  | "publications" | "references" | "custom";
+
+/**
+ * One entry in an optional section. Four fields serve all six kinds; the
+ * PRESET supplies the labels, and a field whose label is "" is not part of
+ * that kind and is never rendered.
+ */
+export interface ExtraEntry {
+  primary: string;
+  secondary: string;
+  date: string;
+  detail: string;
+}
+
+export interface ExtraSection {
+  kind: ExtraKind;
+  title: string;
+  entries: ExtraEntry[];
+}
+
 export interface StructuredData {
   contact: Contact;
   summary: { text: string };
@@ -141,6 +164,7 @@ export interface StructuredData {
   projects: ProjectEntry[];
   education: EducationEntry[];
   skills: SkillGroup[];
+  extras: ExtraSection[];
 }
 
 export type ResumeKind = "base" | "tailored";
@@ -236,7 +260,7 @@ export interface Finding {
 
 /** A single screen of the guided editor. */
 export interface AnalysisStep {
-  id: CategoryKey;
+  id: StepKey;
   index: number;
   title: string;
   description: string;
@@ -244,7 +268,8 @@ export interface AnalysisStep {
   max: number;
   points_available: number;
   finding_count: number;
-  status: "clear" | "minor" | "attention";
+  /** "optional" marks a navigable step that carries no points (extras). */
+  status: "clear" | "minor" | "attention" | "optional";
   findings: Finding[];
 }
 
@@ -260,7 +285,14 @@ export interface AnalysisStepsOut {
   steps: AnalysisStep[];
 }
 
+/** Scoring categories. Every Finding belongs to exactly one. */
 export type CategoryKey = "contact" | "summary" | "experience" | "format";
+
+/**
+ * Step ids. A superset of CategoryKey: "extras" is navigable but unscored and
+ * NEVER emits findings, which is why Finding.category stays CategoryKey.
+ */
+export type StepKey = CategoryKey | "extras";
 
 export interface AnalysisOut {
   id: string;

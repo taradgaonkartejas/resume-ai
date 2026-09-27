@@ -6,7 +6,12 @@ from app.repositories.resume_repository import ResumeRepository
 from app.repositories.template_repository import TemplateRepository
 from app.services import storage
 from app.services.exceptions import ResumeNotFound, UnsupportedFormat
-from app.services.resume_ops import date_label, to_plain_text
+from app.services.resume_ops import (
+    date_label,
+    extra_entry_line,
+    to_plain_text,
+    visible_extras,
+)
 
 FORMATS = {
     "pdf": "application/pdf",
@@ -330,6 +335,14 @@ class ExportService:
                     date_label(entry),
                 )
 
+        def extras_block() -> None:
+            # Reuses this template's own heading()/body(), so a new section type
+            # never needs a per-template branch across the seven templates.
+            for section in visible_extras(data):
+                heading(section["title"])
+                for entry in section["entries"]:
+                    body(extra_entry_line(entry))
+
         if data.get("skills"):
             heading("Skills")
             columns = max(1, min(int(tokens.get("skill_columns", 1) or 1), 3))
@@ -365,6 +378,8 @@ class ExportService:
                             new_x="LMARGIN" if last else "RIGHT",
                             new_y="NEXT" if last else "TOP",
                         )
+
+        extras_block()
 
         return bytes(pdf.output())
 
@@ -425,6 +440,11 @@ class ExportService:
                 label = group.get("label", "")
                 items = ", ".join(group.get("items", []))
                 document.add_paragraph(f"{label}: {items}" if label else items)
+
+        for section in visible_extras(data):
+            document.add_heading(section["title"], level=1)
+            for entry in section["entries"]:
+                document.add_paragraph(extra_entry_line(entry))
 
         buffer = io.BytesIO()
         document.save(buffer)

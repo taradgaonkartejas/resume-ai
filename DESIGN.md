@@ -580,13 +580,162 @@ LangGraph is warranted here rather than a plain chain for two reasons: **human-i
 
 ```mermaid
 stateDiagram-v2
-    [*] --> RetrieveATS
-    RetrieveATS --> RuleEngine: ATS best-practice context
+    [*] --> RuleEngine
     RuleEngine --> ScoringAgent: scores fixed, findings attached
     ScoringAgent --> [*]: prose explanations only
 ```
 
 Linear by design. The rule engine runs before the agent, and its scores are authoritative.
+
+A `RetrieveATS` node used to sit in front of `RuleEngine`. It ran a generic
+`"resume quality ats rules"` search into `state["ats_context"]`, which nothing ever
+read — `ScoringAgent` performs its own search keyed on the categories that actually
+scored badly. It was removed, halving the embedding calls per Analyze click for an
+identical result.
+
+**Free tier only.** Every configured model ends in `:free`, and
+`free_models_only` (default on) strips any paid name from the fallback chain
+before a request is sent, raising rather than silently billing if that leaves
+nothing. The chain is ordered by measured reliability — `k2-horizon:free`
+(100% uptime / 94.6% success / 208ms), then `glm-4.7-flash:free`, then
+`gemma-4-26b:free` — because a fallback exists to answer when the model above
+it did not.
+
+**Optional sections are generic, and deliberately unscored.**
+Certifications, languages, awards, publications, references and user-named
+custom sections all share one shape — `extras: [{kind, title, entries[]}]`,
+where an entry is `{primary, secondary, date, detail}` and the **preset supplies
+the labels**. A field whose label is `""` is not part of that kind and is never
+rendered, so a Languages entry is two inputs while a Publication is four. The
+preview, the three exporters, the editor and the parser each carry one code
+path instead of six, and a user-named section is not a special case.
+
+They are a fifth step in the guided editor — navigable, and **worth no points**.
+Scoring "do you hold certifications" would mark a novelist down for not being a
+sysadmin: that critiques a career rather than a document. `WEIGHTS` is therefore
+untouched, the step reports `score: 0, max: 0, status: "optional"`, and the
+category emits no findings at all. `status` is `"optional"` rather than
+`"clear"` because a green tick would claim completion for a step nobody opened.
+
+`migrate()` backfills `extras: []` on read, so resumes stored before the feature
+existed upcast with no migration and no reset.
+
+The parser recognises the five standard headings and promotes an unrecognised
+heading to a custom section **only if it is ALL-CAPS or ends in a colon**, and
+only after a known heading has already been seen. Plain Title Case is rejected
+because it is indistinguishable from a company name, and the leading-position
+rule stops a candidate's own name from becoming a section.
+
+**"Rewrite with AI" is one lifecycle, not two.**
+`POST /resumes/{id}/sections/{target_ref}/rewrite` drafts a fix for a single
+finding and persists it as an ordinary pending `Suggestion` with
+`origin="analysis"` and `session_id=null`, so Accept / Reject / Edit and version
+history work unchanged. The critic runs before the row is written: an ungrounded
+draft is never stored and the caller gets 422 with the reviewer's note.
+
+Only half of all findings offer it. `Finding.action` is `"rewrite"` for the
+eight that point at editable text and `""` for the eight that do not — no model
+can supply a missing phone number — so the card renders **"Rewrite with AI"** or
+**"Go to field"** accordingly. `experience.no_bullets` is deliberately in the
+second group: its `target_ref` is a container that does not resolve, and
+drafting a first bullet from a job title alone is ungrounded invention.
+
+Two prompt paths: *revise* for existing text, *compose* for
+`summary.missing`, where the ref resolves to `""` and the summary must be built
+from the experience already in the document.
+
+**Accepting a suggestion is conflict-checked.** A suggestion records the
+`original_text` it was written against. `apply_patch` only verifies the
+`target_ref` still resolves, so accepting a stale suggestion used to silently
+overwrite a newer hand-edit. `act()` now compares the live text first and
+returns **409** (`StaleSuggestion` → `ConflictError`) if it moved, leaving the
+suggestion pending so it can still be rejected. 409 is distinct from 422 on
+purpose: nothing about the request is malformed, the world moved underneath it.
+
+**The transport is not assumed to work.** Running the corpus against the live
+provider found three faults that 400 passing offline tests could not see, and
+the gateway is shaped around them.
+
+*Free models accept `json_schema` and reply with markdown anyway.* The verdict
+inside that markdown is usually correct, so discarding it loses real signal —
+an early run reported "the LLM critic is adding nothing" when every call had in
+fact been a correctly-reasoned rejection thrown away by a JSON parse.
+`llm.structured()` therefore falls down a salvage ladder: the provider's own
+parse (`ok`), then JSON embedded in prose or a code fence (`ok-json`), then a
+schema-declared prose reader (`ok-prose`). Each tier records a **distinct
+status**, so a run carried by salvage never looks like one where structured
+output worked. The prose reader **fails closed** — anything it cannot read
+unambiguously returns `None` and degrades to the rules, because the dangerous
+misparse ("I cannot approve this" read as approval) ships a fabrication.
+
+*The free tier allows one request per minute per model per account.* A
+six-draft tailor run made as six calls is guaranteed to be throttled partway
+through, and a throttled critic silently becomes the rule engine. `review_batch`
+therefore judges **every draft in one call**; `review_draft` is a one-element
+batch, so the corpus measures the same code path production runs.
+
+*Not every failure is a model failure.* `llm.classify()` separates
+`rate_limited`, `timeout`, `transient` (provider 503s) and `unparsable` from a
+plain `error`. A throttled model has said nothing about its own quality, and
+recording it as an error is how a transport problem came to be reported as a
+quality verdict. A short `retry in Ns` hint is waited out once, within a
+bounded budget, rather than burning the rest of the chain on the same limit.
+
+**A degraded critic is visible.** When the LLM critic errors, `review_draft`
+falls back to `_rule_critique`. That fallback catches numeric fabrication
+(5/5 in the corpus) and is blind to semantic fabrication (0/8) — invented
+technologies, inflated seniority, changed verbs. Silently swapping one for the
+other is the worst failure this system has, so the fallback is marked
+`status="degraded"`, counted in the graph trace, and written to `agent_runs`
+where `/admin/agent-runs` shows it. Running rules-only with no API key is *not*
+a degradation; it is the documented offline mode.
+
+**The critic is measured, not assumed.** `tests/critic_cases.py` holds 18
+labelled rewrites — 13 fabrications split into numeric and semantic, 5 faithful
+rewrites that must not be rejected. Two rates are tracked: recall on
+fabrications and false rejections on faithful text, because optimising either
+alone is trivial and useless. Offline it pins the rule engine's exact envelope;
+`make critic-report-llm` scores the live model, paced past the rate limit.
+
+The report distinguishes three outcomes by exit code, because "the critic is no
+better than the rules" and "the critic never ran" are not the same claim:
+**0** the LLM wins, **1** it does not beat the rules, **2** inconclusive — every
+call degraded, so the run says nothing. It also reports *how* answers arrived
+(`json_schema` vs salvage) and flags a rise in false rejections, since a
+stricter critic and a better one look identical in the recall column alone.
+
+**Reasoning effort is per task.** The default model runs at *medium* thinking
+effort. The critic only compares two short strings and returns
+`{approved, notes, severity}`, so `TASK_EFFORT` sends `reasoning_effort:
+minimal` for that task alone; every other task omits the field and is unchanged.
+This was chosen over routing the critic to a different model: the faster-looking
+free alternatives are reasoning models that are 3–4× slower end to end, and the
+fastest of them advertises no structured-output support — which `review_draft`
+would have swallowed as a silent fall back to the three-phrase rule critic.
+
+**Embeddings are local.** The free remote embedder reports 24.3% success, and
+the pgvector column is `Vector(384)`, which hosted embedding models do not
+emit — so a *successful* remote call is the case that breaks the insert, and a
+mixed index makes cosine similarity meaningless. One consistent space beats a
+24% chance of a better one at this corpus size. `EMBEDDINGS_REMOTE=true` opts
+back in.
+
+**Parsing.** PDF text is extracted with `pdfplumber`, with `pypdf` as a fallback.
+Two-column resumes are detected by finding a vertical gutter no word crosses
+(`_column_split_x`) and reading each column in order — without this the page
+comes out interleaved row by row and the segmenter reads one nonsensical
+document. Wrapped bullets that lost their glyph are rejoined conservatively,
+date-only lines attach to the entry above rather than replacing it, and
+`POST /resumes/{id}/reparse` re-reads a stored upload with the current parser
+(recording a version first, since it discards manual edits). Parser fixes do not
+otherwise reach resumes that were already parsed.
+
+**Scoring precision.** Term matching is word-boundary based via
+`app/services/text_match.py`, not substring: `"Go"` must not be satisfied by *going*,
+and a JD asking for `k8s` is satisfied by a resume that writes `Kubernetes`. Bullet
+length has two deliberate numbers — `BULLET_COACHED_MAX = 30` (what we advise and what
+the Writer targets) and `BULLET_HARD_CAP = 45` (where points are actually deducted).
+Both live in `heuristics.py`; coaching tighter than we penalise is intentional.
 
 ---
 

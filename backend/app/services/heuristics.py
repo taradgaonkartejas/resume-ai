@@ -232,7 +232,12 @@ def _score_experience(data: dict) -> tuple[int, list[Finding]]:
             points=WEIGHTS["experience"] - 6,
             message="Experience entries have no bullet points",
             fix_hint="Describe what you did and what changed because of it.",
-            action="rewrite",
+            # NOT "rewrite". target_ref="experience" is a container, not text:
+            # resolve() raises InvalidTargetRef on it, so an AI action here
+            # would 422 every single time. There is also nothing to rewrite --
+            # no bullet exists yet, and drafting one from a job title alone is
+            # ungrounded invention, which is exactly what the critic rejects.
+            action="",
         )]
 
     points = 10
@@ -401,6 +406,17 @@ STEPS = [
         "title": "Structure & ATS Readability",
         "description": "Length, required sections, and whether a parser can read it.",
     },
+    {
+        # Navigable but NOT scored. Certifications and languages say real things
+        # about a candidate, but scoring them would mark a novelist down for not
+        # being a sysadmin -- that critiques a career, not a document. So this
+        # step carries no weight, emits no findings, and never moves the score.
+        "id": "extras",
+        "title": "Credentials & Extras",
+        "description": "Certifications, languages, awards and any section you "
+                       "want to add. Optional \u2014 these do not affect your score.",
+        "scored": False,
+    },
 ]
 
 
@@ -445,6 +461,17 @@ def build_steps(data: dict, scored: dict | None = None) -> list[dict]:
     cats = scored["category_scores"]
     steps = []
     for index, spec in enumerate(STEPS):
+        if not spec.get("scored", True):
+            # Zeroed on every axis, so `overall == sum(scores)` and
+            # `max_score == 100` hold by construction. `status` is "optional",
+            # deliberately NOT "clear": a green tick would claim completion for
+            # a step the user has never opened.
+            steps.append({
+                **spec, "index": index, "score": 0, "max": 0,
+                "points_available": 0, "finding_count": 0,
+                "findings": [], "status": "optional",
+            })
+            continue
         cat = cats[spec["id"]]
         findings = cat["findings"]
         available = sum(f["points"] for f in findings)

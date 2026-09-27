@@ -109,7 +109,12 @@ export function AnalysisStepper({
               </h3>
               <ul className="space-y-2">
                 {rankFindings(step.findings).map((f) => (
-                  <RecommendationCard key={f.id} finding={f} onFix={onFix} />
+                  <RecommendationCard
+                    key={f.id}
+                    finding={f}
+                    resumeId={resumeId}
+                    onFix={onFix}
+                  />
                 ))}
               </ul>
             </section>
@@ -205,11 +210,13 @@ function SectionList({
               <span className="min-w-0 flex-1">
                 <span className="block text-sm font-medium">{step.title}</span>
                 <span className="mt-0.5 block text-xs text-content-muted">
-                  {step.finding_count === 0
-                    ? "No issues found"
-                    : `${step.finding_count} recommendation${
-                        step.finding_count === 1 ? "" : "s"
-                      }`}
+                  {step.status === "optional"
+                    ? "Optional \u2014 not scored"
+                    : step.finding_count === 0
+                      ? "No issues found"
+                      : `${step.finding_count} recommendation${
+                          step.finding_count === 1 ? "" : "s"
+                        }`}
                 </span>
               </span>
               {step.points_available > 0 && (
@@ -220,9 +227,11 @@ function SectionList({
                   +{step.points_available}
                 </Badge>
               )}
-              <span className="shrink-0 text-xs tabular-nums text-content-muted">
-                {step.score}/{step.max}
-              </span>
+              {step.max > 0 && (
+                <span className="shrink-0 text-xs tabular-nums text-content-muted">
+                  {step.score}/{step.max}
+                </span>
+              )}
               <ArrowRight className="size-4 shrink-0 text-content-muted" aria-hidden />
             </button>
           </li>
