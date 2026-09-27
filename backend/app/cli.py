@@ -237,18 +237,21 @@ def cmd_push(args) -> int:
         warn("Extension 'vector' unavailable — search falls back to Python cosine.")
 
     new = sorted(set(after) - set(before))
+    drift = _drift(engine)
+
     if new:
         ok(f"Created {len(new)} table(s): {', '.join(new)}")
-    else:
+    elif not drift:
         ok(f"{len(after)} table(s) already in sync.")
+    else:
+        # Never print a green "in sync" line directly above a drift report.
+        warn(f"{len(after)} table(s) present, but the schema is NOT in sync.")
 
-    drift = _drift(engine)
     if drift:
         warn(f"{len(drift)} change(s) in the models are NOT in the database:")
         for line in drift:
             print(f"    - {line}")
-        dim("create_all only adds missing tables; it never alters existing ones.")
-        dim('Use: python -m app.cli migrate dev -m "describe the change"')
+        _print_drift_remedy(drift)
         return 1
 
     ok("Database is in sync with app/models.py.")
@@ -377,11 +380,38 @@ def cmd_status(args) -> int:
         warn(f"{len(drift)} drift item(s):")
         for line in drift:
             print(f"    - {line}")
-    if missing or drift:
+    if missing and not drift:
+        # Whole tables absent: create_all genuinely fixes this.
         dim("Run: python -m app.cli db push")
+        return 1
+    if drift:
+        _print_drift_remedy(drift)
         return 1
     ok("In sync with app/models.py.")
     return 0
+
+
+def _print_drift_remedy(drift: list[str]) -> None:
+    """Say what actually fixes column drift.
+
+    `db push` is create_all, which only ever adds missing TABLES — it cannot
+    add a column to a table that already exists. Pointing at it here sent
+    people in a circle: status -> push -> "use migrate dev" -> which this
+    project has decided against. Name the destructive option plainly instead,
+    because it is the one that works.
+    """
+    column_drift = [d for d in drift if "add_column" in d or "remove_column" in d]
+    dim("")
+    dim("create_all only adds missing TABLES; it never alters existing ones,")
+    dim("so `db push` cannot fix the items above.")
+    dim("")
+    if column_drift:
+        dim("This project resets rather than migrating (see DESIGN.md).")
+        dim("  python -m app.cli db reset        # DROPS ALL DATA, recreates, reseeds")
+        dim("    make db-reset                   # .\\make.ps1 db-reset -Force")
+        dim("")
+        dim("To keep your data instead, generate a revision:")
+        dim('  python -m app.cli migrate dev -m "add resume fork columns"')
 
 
 # ----------------------------------------------------------------- db seed

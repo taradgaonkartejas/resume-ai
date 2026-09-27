@@ -90,13 +90,7 @@ $PY = Resolve-Python
 # If an env is activated but we ended up on a different interpreter anyway,
 # say so loudly rather than failing later with a confusing import error.
 if ($env:CONDA_PREFIX) {
-    # Using Here-Strings to completely avoid PowerShell variable interpolation issues
-    $running = $null
-    $running = & $PY -c @'
-import sys
-print(sys.prefix)
-'@ 2>$null
-
+    $running = (& $PY -c "import sys; print(sys.prefix)" 2>$null)
     if ($running -and ($running.Trim() -ne $env:CONDA_PREFIX.TrimEnd('\', '/'))) {
         Write-Host "warning: activated env is $($env:CONDA_PREFIX)" -ForegroundColor Yellow
         Write-Host "         but the interpreter reports $running" -ForegroundColor Yellow
@@ -198,10 +192,14 @@ switch ($Target.ToLowerInvariant()) {
     }
 
     'which-python' {
-        Write-Host $PY
-        Invoke-Py @('-c', 'import sys; print("prefix :", sys.prefix)')
-        Invoke-Py @('-c', 'import os; print("CONDA_PREFIX:", os.environ.get("CONDA_PREFIX", "(unset)"))')
-        Invoke-Py @('-c', 'import importlib.util as u; print("fastapi:", "OK" if u.find_spec("fastapi") else "MISSING")')
+        # First thing to check when an import fails for a package that
+        # `conda list` says is installed.
+        #
+        # This delegates to doctor.py rather than passing `python -c "..."`
+        # inline: PowerShell re-quotes arguments for native executables, and
+        # embedded double quotes terminate that wrapping early, so the snippet
+        # arrives at python truncated. A plain script path has nothing to quote.
+        Invoke-Py @('doctor.py', '--which')
     }
 
     'doctor'         { Invoke-Py @('doctor.py') }

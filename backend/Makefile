@@ -74,10 +74,7 @@ down:
 # Print the interpreter these targets will actually use. First thing to check
 # when an import fails for a package `conda list` says is installed.
 which-python:
-	@echo "$(PY)"
-	@$(PY) -c "import sys; print('prefix :', sys.prefix)"
-	@$(PY) -c "import os; print('CONDA_PREFIX:', os.environ.get('CONDA_PREFIX', '(unset)'))"
-	@$(PY) -c "import importlib.util as u; print('fastapi:', 'OK' if u.find_spec('fastapi') else 'MISSING')"
+	@$(PY) doctor.py --which
 
 doctor:
 	$(PY) doctor.py

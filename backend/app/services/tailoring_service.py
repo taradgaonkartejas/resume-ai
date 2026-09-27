@@ -9,6 +9,7 @@ from app.repositories.suggestion_repository import SuggestionRepository
 from app.repositories.tailoring_repository import TailoringRepository
 from app.repositories.vector_repository import VectorRepository
 from app.services import resume_ops
+from app.services.analysis_service import _require_parsed
 from app.services.exceptions import ResumeNotFound, ValidationError
 from app.services.heuristics import extract_keywords, match_keywords
 
@@ -78,6 +79,10 @@ class TailoringService:
             raise ResumeNotFound(str(resume_id))
         if not jd_content or not jd_content.strip():
             raise ValidationError("Job description content is required")
+        # Guard BEFORE the fork: a fork inherits parse_status verbatim, so
+        # tailoring an unparsed resume would otherwise silently create a child
+        # that is just as unusable as its parent.
+        _require_parsed(resume)
 
         # Fork BEFORE running the graph so every suggestion, version and
         # accepted edit belongs to the child. The base resume is never

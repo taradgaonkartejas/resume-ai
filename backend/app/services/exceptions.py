@@ -42,5 +42,13 @@ class QuotaExceeded(ValidationError):
     pass
 
 
+class ResumeNotReady(InvalidStateTransition):
+    """The resume has not finished parsing, or parsing failed.
+
+    Scoring or tailoring an unparsed resume yields a near-zero score that reads
+    as "your resume is bad" instead of "we have not read it yet".
+    """
+
+
 class UnsupportedFormat(ValidationError):
     pass

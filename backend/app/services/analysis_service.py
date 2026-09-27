@@ -6,14 +6,31 @@ from app.repositories.agent_run_repository import AgentRunRepository
 from app.repositories.analysis_repository import AnalysisRepository
 from app.repositories.resume_repository import ResumeRepository
 from app.repositories.vector_repository import VectorRepository
-from app.services.exceptions import NotFoundError, ResumeNotFound
+from app.services.exceptions import NotFoundError, ResumeNotFound, ResumeNotReady
 from app.services.heuristics import build_steps, infer_role_tags, score_resume
 
 logger = logging.getLogger(__name__)
 
 
+def _require_parsed(resume) -> None:
+    """Refuse to score a resume we have not successfully read.
+
+    Without this, a "pending" or "failed" resume holds empty_resume() and scores
+    near zero -- indistinguishable, to the user, from a genuinely weak resume.
+    """
+    status = getattr(resume, "parse_status", "ready")
+    if status == "ready":
+        return
+    if status == "failed":
+        note = (getattr(resume, "parse_note", "") or "").strip()
+        raise ResumeNotReady(
+            f"This resume could not be read, so it cannot be analysed. {note}".strip()
+        )
+    raise ResumeNotReady("This resume is still being processed. Try again in a moment.")
+
+
 class AnalysisService:
-    """Scoring pipeline: RetrieveATS -> RuleEngine -> ScoringAgent.
+    """Scoring pipeline: RuleEngine -> ScoringAgent.
 
     The numeric score comes from the rule engine only, so it is reproducible.
     An LLM, when configured, contributes prose commentary — never the number.
@@ -43,6 +60,7 @@ class AnalysisService:
 
     def analyze(self, resume_id: uuid.UUID, user_id: uuid.UUID) -> AnalysisReport:
         resume = self._owned(resume_id, user_id)
+        _require_parsed(resume)
         data = resume.structured_data or {}
 
         result, role_tags, trace = self._run_graph(data, user_id)
@@ -86,7 +104,7 @@ class AnalysisService:
                 score_resume(data),
                 infer_role_tags(data),
                 {
-                    "nodes": ["RetrieveATS", "RuleEngine", "ScoringAgent"],
+                    "nodes": ["RuleEngine", "ScoringAgent"],
                     "deterministic": True,
                     "llm_used": False,
                 },

@@ -311,12 +311,62 @@ STEP_META = [
 ]
 
 ACTION_VERBS = {
-    "led", "built", "designed", "migrated", "reduced", "improved", "launched",
-    "automated", "scaled", "delivered", "implemented", "architected",
-    "optimized", "optimised", "created", "drove", "shipped", "owned",
-    "established", "mentored",
+    # Leadership / ownership
+    "led", "owned", "drove", "directed", "headed", "spearheaded", "championed",
+    "coordinated", "oversaw", "managed", "mentored", "coached", "guided",
+    # Building / creating
+    "built", "created", "designed", "developed", "engineered", "architected",
+    "implemented", "launched", "shipped", "delivered", "deployed", "established",
+    "founded", "introduced", "produced", "authored", "prototyped",
+    # Improving / changing
+    "improved", "optimised", "optimized", "reduced", "increased", "accelerated",
+    "streamlined", "automated", "scaled", "migrated", "modernised", "modernized",
+    "refactored", "restructured", "transformed", "consolidated", "eliminated",
+    "resolved", "fixed", "hardened", "simplified", "standardised", "standardized",
+    "upgraded", "rearchitected", "orchestrated",
+    # Analysis / research
+    "analysed", "analyzed", "researched", "investigated", "diagnosed",
+    "identified", "evaluated", "measured", "forecast", "modelled", "modeled",
+    # Business / cross-functional
+    "negotiated", "partnered", "collaborated", "presented", "influenced",
+    "secured", "generated", "grew", "expanded", "recovered", "saved",
 }
-METRIC_RE = re.compile(r"(\d+(\.\d+)?\s*%|\$\s?\d|\b\d{2,}\b|\bx\d+\b)")
+
+# Mirrors backend app/services/text_match.py. Substring matching credited
+# "Fulfilled" with the verb "led" and "Downed" with "owned".
+_WORDISH = re.compile(r"\w")
+_PAT_CACHE = {}
+
+
+def contains(text, term):
+    pat = _PAT_CACHE.get(term)
+    if pat is None:
+        t = term.strip()
+        if not t:
+            return False
+        esc = re.sub(r"(?:\\[ ]|\s)+", r"\\s+", re.escape(t))
+        left = r"(?<!\w)" if _WORDISH.match(t[0]) else ""
+        right = r"(?!\w)" if _WORDISH.match(t[-1]) else ""
+        pat = _PAT_CACHE[term] = re.compile(left + esc + right, re.IGNORECASE)
+    return bool(pat.search(text))
+
+
+# Mirrors backend _METRIC_RE: a bare number is not an achievement.
+METRIC_RE = re.compile(
+    r"""(
+          \d+(?:\.\d+)?\s*%
+        | [$£€]\s?\d
+        | \b\d+(?:\.\d+)?\s*[kmb]\b
+        | \bx\s?\d+(?:\.\d+)?\b
+        | \b\d+(?:\.\d+)?\s?x\b
+        | \b\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|seconds|min|mins|minutes
+                              |hr|hrs|hours|days|weeks|months|years)\b
+        | \b(?!(?:19|20)\d{2}\b)\d+(?:\.\d+)?\s+\w+
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+BULLET_COACHED_MAX = 30
+BULLET_HARD_CAP = 45
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -409,7 +459,7 @@ def score_data(d):
                                "Summary has no quantified achievement",
                                "Add a real number — team size, users served, latency cut.",
                                "rewrite"))
-        if any(v in t.lower() for v in ACTION_VERBS):
+        if any(contains(t, v) for v in ACTION_VERBS):
             pts += 6
         else:
             fs.append(_finding("summary.no_action_verb", "summary", "summary.text", 6,
@@ -500,12 +550,12 @@ def score_data(d):
                            "Resume may exceed two pages — %d words" % w,
                            "Cut older roles back to two or three bullets."))
     if bullets:
-        over = [r for r, b in _exp_bullets(d) if len(b.split()) > 45]
+        over = [r for r, b in _exp_bullets(d) if len(b.split()) > BULLET_HARD_CAP]
         if over:
             pts += 2
             fs.append(_finding("format.overlong_bullets", "format", over[0], 3,
                                "%d bullet(s) are very long" % len(over),
-                               "Keep bullets under about 30 words so they get read.",
+                               "Keep bullets under about %d words so they get read." % BULLET_COACHED_MAX,
                                "rewrite"))
         else:
             pts += 5

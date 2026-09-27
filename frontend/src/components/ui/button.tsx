@@ -31,10 +31,26 @@ const buttonVariants = cva(
           "size-7 rounded-[min(var(--radius-md),12px)] in-data-[slot=button-group]:rounded-lg",
         "icon-lg": "size-9",
       },
+      // Declared AFTER `size` on purpose: several sizes set their own
+      // `rounded-*`, and `cn` (tailwind-merge) keeps the last conflicting
+      // class, so `pill` reliably wins without !important or per-call
+      // overrides. Padding is left to `size` so an icon-only pill stays a
+      // true circle instead of an oval.
+      //
+      // NOTE: cva itself does NOT de-duplicate, so `buttonVariants({shape:
+      // "pill"})` returns both `rounded-lg` and `rounded-full`. Only the
+      // `cn()` wrapper in <Button> below resolves that. If you ever apply
+      // these classes directly (e.g. to style a <Link>), wrap the result in
+      // cn() or the radius is undefined.
+      shape: {
+        default: "",
+        pill: "rounded-full",
+      },
     },
     defaultVariants: {
       variant: "default",
       size: "default",
+      shape: "default",
     },
   }
 )
@@ -43,12 +59,13 @@ function Button({
   className,
   variant = "default",
   size = "default",
+  shape = "default",
   ...props
 }: ButtonPrimitive.Props & VariantProps<typeof buttonVariants>) {
   return (
     <ButtonPrimitive
       data-slot="button"
-      className={cn(buttonVariants({ variant, size, className }))}
+      className={cn(buttonVariants({ variant, size, shape, className }))}
       {...props}
     />
   )

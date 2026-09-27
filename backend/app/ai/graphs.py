@@ -124,7 +124,6 @@ def reset_checkpointer() -> None:
 # ============================================================== analysis graph
 class AnalysisState(TypedDict, total=False):
     structured_data: dict
-    ats_context: list
     rule_result: dict
     role_tags: list
     commentary: dict
@@ -132,18 +131,6 @@ class AnalysisState(TypedDict, total=False):
 
 
 def _make_analysis_graph(store: VectorStore | None):
-    def retrieve_ats(state: AnalysisState) -> AnalysisState:
-        hits: list = []
-        if store is not None:
-            try:
-                hits = store.search("resume quality ats rules", corpus="ats_rules", k=5)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("ATS retrieval failed: %s", exc)
-        return {
-            "ats_context": [h.content for h in hits],
-            "trace": [{"node": "RetrieveATS", "hits": len(hits)}],
-        }
-
     def rule_engine(state: AnalysisState) -> AnalysisState:
         data = state.get("structured_data") or {}
         result = score_resume(data)
@@ -177,11 +164,14 @@ def _make_analysis_graph(store: VectorStore | None):
         }
 
     builder = StateGraph(AnalysisState)
-    builder.add_node("RetrieveATS", retrieve_ats)
+    # RetrieveATS used to sit in front of RuleEngine. It ran a generic
+    # "resume quality ats rules" search into state["ats_context"], which nothing
+    # ever read -- ScoringAgent does its own, better-targeted search keyed on the
+    # actually-weak categories. Removing it halves the embedding calls per
+    # Analyze click for an identical result.
     builder.add_node("RuleEngine", rule_engine)
     builder.add_node("ScoringAgent", scoring_agent)
-    builder.add_edge(START, "RetrieveATS")
-    builder.add_edge("RetrieveATS", "RuleEngine")
+    builder.add_edge(START, "RuleEngine")
     builder.add_edge("RuleEngine", "ScoringAgent")
     builder.add_edge("ScoringAgent", END)
     return builder.compile()

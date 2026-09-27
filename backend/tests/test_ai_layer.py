@@ -122,7 +122,6 @@ def test_analysis_graph_is_deterministic():
 def test_analysis_graph_visits_every_node():
     state = graphs.run_analysis(RESUME)
     assert [s["node"] for s in state["trace"]] == [
-        "RetrieveATS",
         "RuleEngine",
         "ScoringAgent",
     ]

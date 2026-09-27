@@ -174,7 +174,55 @@ def check_socket(host: str, port: int) -> None:
         print("         docker compose up -d db --wait   (from the repo root)")
 
 
+def which_python() -> int:
+    """`--which`: which interpreter is actually running, and is it the right one?
+
+    Deliberately a doctor.py mode rather than a `python -c "..."` snippet in
+    the Makefile and make.ps1. Passing a quoted one-liner through PowerShell to
+    a native .exe mangles embedded double quotes, and duplicating the logic in
+    two runners means fixing it twice. A plain script path has nothing to
+    quote.
+    """
+    header("Interpreter")
+    print(f"exe          {sys.executable}")
+    print(f"version      {sys.version.split()[0]}")
+    print(f"prefix       {sys.prefix}")
+
+    prefix = os.environ.get("CONDA_PREFIX")
+    name = os.environ.get("CONDA_DEFAULT_ENV")
+    print(f"CONDA_PREFIX {prefix or '(unset)'}")
+    print(f"conda env    {name or '(unset)'}")
+
+    header("Key packages")
+    ok = True
+    for pkg in ("fastapi", "uvicorn", "sqlalchemy", "pydantic"):
+        found = importlib.util.find_spec(pkg) is not None
+        print(f"{OK if found else BAD}{pkg:12} {'OK' if found else 'MISSING'}")
+        ok = ok and found
+
+    header("Verdict")
+    if prefix and pathlib.Path(prefix).resolve() != pathlib.Path(sys.prefix).resolve():
+        print(f"{BAD}WRONG INTERPRETER — the activated env is not the one running.")
+        print(f"         activated : {pathlib.Path(prefix).resolve()}")
+        print(f"         running   : {pathlib.Path(sys.prefix).resolve()}")
+        print("")
+        print("         Packages installed into the env are invisible from here.")
+        print("         Do NOT reinstall anything; the interpreter is the problem.")
+        print(f"           conda run -n {name or 'resume-ai'} --no-capture-output python -m uvicorn app.main:app --reload")
+        print("           conda init powershell     # permanent fix; then a NEW terminal")
+        return 1
+    if not ok:
+        print(f"{BAD}right interpreter, but dependencies are missing.")
+        print("           conda env update -f environment.yaml --prune")
+        return 1
+    print(f"{OK}interpreter and key packages look correct.")
+    return 0
+
+
 def main() -> int:
+    if "--which" in sys.argv[1:]:
+        return which_python()
+
     here = pathlib.Path(__file__).resolve().parent
 
     interpreter_ok = check_interpreter()

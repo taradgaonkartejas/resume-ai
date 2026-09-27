@@ -3,8 +3,8 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.services.resume_ops import migrate
 from app.models import JobDescription, Resume, ResumeVersion, Template, User
+from app.services.resume_ops import migrate
 
 USERS = [
     ("Priya Sharma", "priya@example.com", "Site Reliability Engineer", "#2563eb"),

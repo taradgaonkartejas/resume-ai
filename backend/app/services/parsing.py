@@ -30,7 +30,21 @@ _SECTION_HEADS = {
     "skills": {"skills", "technical skills", "technologies"},
 }
 
-_BULLET_RE = re.compile(r"^\s*[-•*\u2022\u25cf\u25aa]\s+(.*)$")
+# Glyph bullets plus numbered lists ("1." / "2)"). Without the numeric
+# alternative a numbered resume produced ZERO experience entries: the lines
+# fell through to the header branch and were consumed as company/role.
+_BULLET_RE = re.compile(r"^\s*(?:[-•*\u2022\u25cf\u25aa]|\d+[.)])\s+(.*)$")
+
+# Extraction-failure thresholds. These diagnose "we could not read the file",
+# which is NOT the same question as "is this resume any good".
+#
+# The distinction is format-specific on purpose: a PDF can be a page of scanned
+# pixels that yields no text operators, so a PDF with almost no words is
+# overwhelmingly a scan. A .txt or .docx cannot fail that way -- if it holds
+# four words then it genuinely holds four words, and telling that user their
+# file "may be a scanned image" would be wrong.
+MIN_WORDS_PDF = 15
+MIN_WORDS_TEXT = 3
 _DATE_RE = re.compile(
     r"((19|20)\d{2}|present|current|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)",
     re.I,
@@ -48,7 +62,19 @@ def extract_text(filename: str, content: bytes) -> str:
         import docx
 
         document = docx.Document(io.BytesIO(content))
-        return "\n".join(p.text for p in document.paragraphs)
+        parts = [p.text for p in document.paragraphs]
+        # document.paragraphs EXCLUDES table cells. Resumes routinely put the
+        # whole skills grid (or a two-column contact block) in a table, and all
+        # of it was being dropped silently.
+        for table in document.tables:
+            for row in table.rows:
+                cells = [c.text.strip() for c in row.cells]
+                # A merged cell repeats its text across the row; de-duplicate
+                # consecutively so "Python, Go" does not appear three times.
+                deduped = [c for i, c in enumerate(cells) if c and (i == 0 or c != cells[i - 1])]
+                if deduped:
+                    parts.append(": ".join(deduped) if len(deduped) > 1 else deduped[0])
+        return "\n".join(parts)
     return content.decode("utf-8", errors="replace")
 
 
@@ -179,6 +205,21 @@ def structure_text(raw: str) -> dict:
     return migrate(data)
 
 
+def _extraction_failure(filename: str, raw: str) -> str:
+    """Return a user-facing reason if extraction clearly failed, else ""."""
+    words = len(raw.split())
+    is_pdf = filename.lower().endswith(".pdf")
+    if is_pdf and words < MIN_WORDS_PDF:
+        return (
+            "No readable text found - this file may be a scanned image. "
+            "Please upload a text-based PDF or DOCX."
+        )
+    if words < MIN_WORDS_TEXT:
+        return "This file appears to be empty - no readable text was found."
+    return ""
+
+
+
 class ParsingService:
     def __init__(
         self,
@@ -198,9 +239,19 @@ class ParsingService:
             filename = resume.storage_key.rsplit("/", 1)[-1]
             raw = extract_text(filename, content)
             resume.raw_text = raw
-            resume.structured_data = structure_text(raw)
-            resume.parse_status = "ready"
-            resume.parse_note = ""
+            # pypdf returns "" for image-only pages and raises nothing, so a
+            # scanned resume used to land as parse_status="ready" holding an
+            # empty document. The user then saw a near-zero ATS score and no
+            # hint that the real problem was "we could not read your file".
+            note = _extraction_failure(filename, raw)
+            if note:
+                resume.structured_data = empty_resume()
+                resume.parse_status = "failed"
+                resume.parse_note = note
+            else:
+                resume.structured_data = structure_text(raw)
+                resume.parse_status = "ready"
+                resume.parse_note = ""
         except Exception as exc:  # noqa: BLE001 — surfaced via parse_status
             resume.parse_status = "failed"
             resume.parse_note = f"{type(exc).__name__}: {exc}"

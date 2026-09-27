@@ -133,7 +133,8 @@ function SuggestionCard({
           {editing ? (
             <>
               <Button
-                className="h-8 flex-1 text-xs"
+                shape="pill"
+                className="h-8 flex-1 px-3.5 text-xs"
                 disabled={act.isPending || !draft.trim()}
                 onClick={() =>
                   act.mutate(
@@ -147,7 +148,8 @@ function SuggestionCard({
               </Button>
               <Button
                 variant="outline"
-                className="h-8 text-xs"
+                shape="pill"
+                className="h-8 px-3.5 text-xs"
                 onClick={() => {
                   setDraft(effectiveText(suggestion));
                   setEditing(false);
@@ -162,7 +164,8 @@ function SuggestionCard({
               {/* Accept is filled, Reject is a ghost with a border: the
                   destructive action must not compete visually. */}
               <Button
-                className="h-8 flex-1 bg-accept text-xs text-on-accept hover:bg-accept/90"
+                shape="pill"
+                className="h-8 flex-1 bg-accept px-3.5 text-xs text-on-accept hover:bg-accept/90"
                 disabled={act.isPending}
                 onClick={() => act.mutate({ id: suggestion.id, action: "accept" })}
               >
@@ -175,7 +178,8 @@ function SuggestionCard({
               </Button>
               <Button
                 variant="outline"
-                className="h-8 border-reject-text/50 text-xs text-reject-text hover:bg-reject-text/10"
+                shape="pill"
+                className="h-8 border-reject-text/50 px-3.5 text-xs text-reject-text hover:bg-reject-text/10"
                 disabled={act.isPending}
                 onClick={() => act.mutate({ id: suggestion.id, action: "reject" })}
               >
@@ -184,7 +188,8 @@ function SuggestionCard({
               </Button>
               <Button
                 variant="outline"
-                className="h-8 text-xs"
+                size="icon"
+                shape="pill"
                 disabled={act.isPending}
                 onClick={() => setEditing(true)}
                 aria-label="Edit suggestion"

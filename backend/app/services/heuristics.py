@@ -18,16 +18,59 @@ import re
 from dataclasses import asdict, dataclass, field
 
 from app.services.resume_ops import date_label, to_plain_text
+from app.services.text_match import canonical_aliases, contains, count_hits
 
 WEIGHTS = {"contact": 15, "summary": 20, "experience": 45, "format": 20}
 
+# Two different numbers on purpose, and now stated in one place instead of
+# contradicting each other across heuristics.py, corpora.py and prompts.py:
+#   COACHED  - what we advise and what the Writer aims for.
+#   HARD_CAP - where the rule engine actually deducts points.
+# Coaching a tighter target than we penalise is deliberate; doing it silently
+# was the bug.
+BULLET_COACHED_MAX = 30
+BULLET_HARD_CAP = 45
+
 ACTION_VERBS = {
-    "led", "built", "designed", "migrated", "reduced", "improved", "launched",
-    "automated", "scaled", "delivered", "implemented", "architected", "optimized",
-    "optimised", "created", "drove", "shipped", "owned", "established", "mentored",
+    # Leadership / ownership
+    "led", "owned", "drove", "directed", "headed", "spearheaded", "championed",
+    "coordinated", "oversaw", "managed", "mentored", "coached", "guided",
+    # Building / creating
+    "built", "created", "designed", "developed", "engineered", "architected",
+    "implemented", "launched", "shipped", "delivered", "deployed", "established",
+    "founded", "introduced", "produced", "authored", "prototyped",
+    # Improving / changing
+    "improved", "optimised", "optimized", "reduced", "increased", "accelerated",
+    "streamlined", "automated", "scaled", "migrated", "modernised", "modernized",
+    "refactored", "restructured", "transformed", "consolidated", "eliminated",
+    "resolved", "fixed", "hardened", "simplified", "standardised", "standardized",
+    "upgraded", "rearchitected", "orchestrated",
+    # Analysis / research
+    "analysed", "analyzed", "researched", "investigated", "diagnosed",
+    "identified", "evaluated", "measured", "forecast", "modelled", "modeled",
+    # Business / cross-functional
+    "negotiated", "partnered", "collaborated", "presented", "influenced",
+    "secured", "generated", "grew", "expanded", "recovered", "saved",
 }
 
-_METRIC_RE = re.compile(r"(\d+(\.\d+)?\s*%|\$\s?\d|\b\d{2,}\b|\bx\d+\b)")
+# A number only counts as quantification when something is actually being
+# measured. The old pattern included a bare `\b\d{2,}\b`, so "shipped it in
+# 2023" scored as a quantified achievement. Every branch below now requires a
+# unit, a currency, a multiplier, or a following word -- and year-shaped values
+# are explicitly excluded from the number+noun branch.
+_METRIC_RE = re.compile(
+    r"""(
+          \d+(?:\.\d+)?\s*%                       # 40%   3.5 %
+        | [$£€]\s?\d                              # $1.2M
+        | \b\d+(?:\.\d+)?\s*[kmb]\b               # 40k   1.2M
+        | \bx\s?\d+(?:\.\d+)?\b                   # x3
+        | \b\d+(?:\.\d+)?\s?x\b                   # 3x
+        | \b\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|seconds|min|mins|minutes
+                              |hr|hrs|hours|days|weeks|months|years)\b
+        | \b(?!(?:19|20)\d{2}\b)\d+(?:\.\d+)?\s+\w+   # 8 teams, 40 services
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -152,7 +195,9 @@ def _score_summary(data: dict) -> tuple[int, list[Finding]]:
             action="rewrite",
         ))
 
-    if any(v in text.lower() for v in ACTION_VERBS):
+    # Whole-word, not substring: "Fulfilled orders" used to earn action-verb
+    # credit because "fulfilled" contains "led", and "Downed" contains "owned".
+    if any(contains(text, v) for v in ACTION_VERBS):
         points += 6
     else:
         findings.append(Finding(
@@ -315,7 +360,8 @@ def _score_format(data: dict) -> tuple[int, list[Finding]]:
     bullets = [b for e in data.get("experience", []) or [] for b in e.get("bullets", [])]
     if bullets:
         overlong = [
-            r for r, _p, t in _iter_experience_bullets(data) if len(t.split()) > 45
+            r for r, _p, t in _iter_experience_bullets(data)
+            if len(t.split()) > BULLET_HARD_CAP
         ]
         if overlong:
             points += 2
@@ -323,7 +369,7 @@ def _score_format(data: dict) -> tuple[int, list[Finding]]:
                 id="format.overlong_bullets", category="format",
                 target_ref=overlong[0], severity=_sev(3), points=3,
                 message=f"{len(overlong)} bullet(s) are very long",
-                fix_hint="Keep bullets under about 30 words so they get read.",
+                fix_hint=f"Keep bullets under about {BULLET_COACHED_MAX} words so they get read.",
                 action="rewrite", meta={"refs": overlong},
             ))
         else:
@@ -421,7 +467,7 @@ def build_steps(data: dict, scored: dict | None = None) -> list[dict]:
 
 def infer_role_tags(data: dict, limit: int = 5) -> list[str]:
     """Cheap, deterministic role inference from skills and bullet text."""
-    text = to_plain_text(data).lower()
+    text = to_plain_text(data)
     catalogue = {
         "Backend Engineer": ["python", "fastapi", "django", "api", "microservice"],
         "Frontend Engineer": ["react", "typescript", "css", "frontend", "ui"],
@@ -432,7 +478,7 @@ def infer_role_tags(data: dict, limit: int = 5) -> list[str]:
     }
     scored = []
     for role, terms in catalogue.items():
-        hits = sum(1 for t in terms if t in text)
+        hits = count_hits(text, terms)
         if hits:
             scored.append((hits, role))
     scored.sort(reverse=True)
@@ -461,9 +507,15 @@ def extract_keywords(text: str, limit: int = 40) -> list[str]:
 
 def match_keywords(data: dict, keywords: list[str]) -> dict:
     """Split keywords into matched/gap against the resume text."""
-    text = to_plain_text(data).lower()
-    matched = [k for k in keywords if k.lower() in text]
-    gap = [k for k in keywords if k.lower() not in text]
+    text = to_plain_text(data)
+    # Whole-word/phrase matching, expanded through the skill taxonomy so a JD
+    # asking for "k8s" is satisfied by a resume that only writes "Kubernetes".
+    # Substring matching used to report 50% match on a resume that mentioned
+    # none of the keywords ("Go" inside "going", "R" inside everything).
+    matched, gap = [], []
+    for k in keywords:
+        spellings = canonical_aliases(k)
+        (matched if any(contains(text, s) for s in spellings) else gap).append(k)
     percent = round(100.0 * len(matched) / len(keywords), 1) if keywords else 0.0
     return {
         "matched_keywords": matched,
