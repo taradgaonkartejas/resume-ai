@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     # vendor, not things an operator should be editing.
     nvidia_api_key: str = ""      # build.nvidia.com  — no card, ~40 req/min
     groq_api_key: str = ""        # console.groq.com  — no card, 30 req/min
+    codecraft_api_key: str = ""   # codecraftapi.com — no card, 60 req/min
     unorouter_api_key: str = ""   # legacy; 1 req/min/model, hence the move
 
     # Per-task routing, qualified as "provider:model".
@@ -77,16 +78,49 @@ class Settings(BaseSettings):
     # critic (groq) -- a writer graded by its own family is not an
     # independent measurement, and there is a test that enforces it.
     #
-    # UNVERIFIED FOR GENERATION. nemotron-3-ultra-550b-a55b answered the
-    # 2026-10-02 probe in 3.22s, but that was a 1-token ping, and this
-    # project has already been bitten twice by trusting one: lightning-30b
-    # pings in 0.33s and times out at 45s on real work.
+    # 2026-10-11: was nemotron-3-ultra-550b-a55b, replaced after it timed out
+    # at 45,187 ms on a real scoring call in the user's own logs. That id had
+    # been marked UNVERIFIED FOR GENERATION in this very comment; the
+    # verification arrived as a production failure, which is the expensive
+    # way to get it.
     #
-    # Run `make models-gen-all PROVIDER=nvidia` to measure every free NVIDIA
-    # model on a real generation, then set this to the fastest usable one.
-    # If this id is slow or dead, the chain falls through to Groq, so the
-    # app degrades rather than breaks.
-    model_writing: str = "nvidia:nvidia/nemotron-3-ultra-550b-a55b"
+    # muse-glimmer-30b was measured by `make models-gen-all nvidia`:
+    # 5.2s, 21 words, 0 instruction defects. Two faster models were passed
+    # over deliberately:
+    #
+    #   openai/gpt-oss-20b (1.5s)  -- same `openai/gpt-oss` family as the
+    #       critic, so the writer would be judged by a sibling. Independence
+    #       of writer and critic is enforced by a test; see below.
+    #   google/diffusiongemma-26b-a4b-it (1.1s) -- Google-authored. No data
+    #       reaches Google here (NVIDIA hosts the weights), but the user's
+    #       exclusion of Google is firmly held and not worth 4 seconds.
+    #
+    # STILL ONLY PARTLY VERIFIED. `models-gen-all` generates plain prose,
+    # while every real call goes through `llm.structured()` with a
+    # json_schema -- and `RevisionDraft` has no `from_prose()`, so it has no
+    # salvage rung if the model cannot do schemas. Confirm with
+    # `make writer-report-llm` before trusting this for real work.
+    # 2026-10-11, SECOND change today and this one is the USER'S CHOICE over
+    # a recorded objection: the writer payload is the resume itself -- real
+    # name, phone, address, employers, dates -- and codecraft names no
+    # upstream provider, so where that data lands is unknowable. The user was
+    # told this plainly and chose it anyway; it is their document.
+    #
+    # Technically unverified too: codecraft advertises `json_mode`, not
+    # `json_schema`, and RevisionDraft has no from_prose() salvage rung.
+    # Run `make models-gen-all codecraft` (the probe now tests a real schema)
+    # and then `make writer-report-llm` before relying on this.
+    #
+    # Previous value, measured good and kept as the documented fallback:
+    #   nvidia:meta/muse-glimmer-30b   5.2s, 21 words, 0 defects
+    #
+    # On picking the id: codecraft's free plan meters TOKENS, not money, and
+    # this project uses ~25% of the monthly allowance. The per-token price
+    # tier is therefore irrelevant -- a $8.30 model and a $0.12 model consume
+    # the allowance identically. Choose on `make writer-report-llm` results
+    # alone, and do not infer capability from the name; several ids in that
+    # catalogue are not products the vendor they cite ships.
+    model_writing: str = "codecraft:claude-sonnet-5"
     model_chat: str = "groq:openai/gpt-oss-120b"
     model_critique: str = "groq:openai/gpt-oss-120b"
     model_extraction: str = "groq:openai/gpt-oss-120b"
@@ -98,14 +132,26 @@ class Settings(BaseSettings):
     model_scoring: str = "groq:openai/gpt-oss-20b"
     # The ATS agent is NOT scoring work and must not inherit the 20b model.
     # Scoring writes prose about a number that is already decided -- low
-    # stakes, so the small model is right. The ATS agent makes the hardest
-    # judgement in the product: whether "My Journey" is a hidden work history
-    # (relabel) or "Leadership & Achievements" is genuinely custom (leave
-    # alone). Those are structurally identical and only the content tells
-    # them apart. It was briefly wired to `scoring`, which silently put the
-    # smallest model in the catalogue on the one task where being wrong
-    # makes the user hand-edit a document that was already correct.
-    model_ats: str = "groq:openai/gpt-oss-120b"
+    # stakes, so the small model is right. The ATS agent states FACTS about
+    # the world ("CKA" = Certified Kubernetes Administrator), and a wrong
+    # one puts a credential on the resume that the user does not hold.
+    #
+    # This slot used to justify itself with a harder task -- deciding whether
+    # "My Journey" is a hidden work history or "Leadership & Achievements" is
+    # genuinely custom. That half was deleted on 2026-10-11 after failing a
+    # pre-registered false-positive gate. The 120b stays anyway: the
+    # remaining task is recall of real-world credential names, which is
+    # exactly what the larger model is better at.
+    # 2026-10-11 -> codecraft. This is the slot where the move is clearly
+    # right: after the relabel half was deleted, the entire ATS payload is
+    #
+    #     "Skills written only as an acronym:\nPMP, CKA"
+    #
+    # -- no name, no employer, no dates, nothing personal. The privacy
+    # objection that applies to writing simply does not apply here, and
+    # codecraft's 60 req/min fixes the Groq 429 that interrupted the
+    # ats-report run. Groq remains in the chain underneath.
+    model_ats: str = "codecraft:deepseek-v4-pro-0813"
 
     # Unused while embeddings_remote is False (see below) but kept valid so
     # a flip of that flag does not 404.
@@ -157,7 +203,12 @@ class Settings(BaseSettings):
         """
         return any(
             not is_placeholder(k)
-            for k in (self.nvidia_api_key, self.groq_api_key, self.unorouter_api_key)
+            for k in (
+                self.nvidia_api_key,
+                self.groq_api_key,
+                self.codecraft_api_key,
+                self.unorouter_api_key,
+            )
         )
 
 

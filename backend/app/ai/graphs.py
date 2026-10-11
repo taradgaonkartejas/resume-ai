@@ -187,9 +187,9 @@ def _make_analysis_graph(store: VectorStore | None):
     # Analyze click for an identical result.
     builder.add_node("RuleEngine", rule_engine)
     builder.add_node("ScoringAgent", scoring_agent)
-    # AtsAgent answers the machine-readability questions rules cannot, and is
-    # self-gating: with no mislabelled section and no bare acronym it returns
-    # an empty review without calling a model, which is the common case. It
+    # AtsAgent answers the machine-readability question rules cannot -- what
+    # does this acronym stand for -- and is self-gating: with no bare acronym
+    # it returns an empty review without calling a model, the common case. It
     # runs last because it must never influence the number -- by the time it
     # executes, `rule_result` is already final.
     builder.add_node("AtsAgent", ats_agent)

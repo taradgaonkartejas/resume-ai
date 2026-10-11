@@ -191,6 +191,55 @@ def _resolved_for(task: str) -> str | None:
     return chain[0] if chain else None
 
 
+_SCHEMA_PROMPT = (
+    "Rewrite this resume bullet so the impact is explicit. Do not invent "
+    "numbers.\n\nBullet: Responsible for the payments service."
+)
+
+
+def _probe_structured(qualified: str) -> tuple[bool, str]:
+    """Can this model honour a json_schema response_format?
+
+    EVERY production call goes through `llm.structured()`, never plain prose.
+    A model that writes beautifully and cannot do schemas is useless to this
+    app, and the writer is the worst place to find out: the salvage ladder's
+    third rung needs `from_prose()`, and `RevisionDraft` -- the writer's
+    schema -- does not have one. No schema, no salvage, no output.
+
+    This check exists because the prose probe cleared
+    nemotron-3-ultra-550b-a55b at 6.0s on 2026-10-11 while the same model was
+    timing out at 45s on real scoring calls in production. The probe was
+    measuring the wrong thing. Trusting a ping over a generation cost this
+    project two models; trusting a generation over a *structured* generation
+    cost it a third.
+
+    Mirrors `llm.structured` exactly -- same method, same include_raw -- so a
+    pass here means the production path works, not something adjacent to it.
+    """
+    from app.ai.schemas import RevisionDraft
+
+    effort = llm.effort_for("writing", qualified)
+    start = time.monotonic()
+    try:
+        runnable = llm._client(qualified, 0.2, effort).with_structured_output(
+            RevisionDraft, method="json_schema", include_raw=True
+        )
+        envelope = runnable.invoke(_SCHEMA_PROMPT)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{time.monotonic() - start:6.1f}s  schema: {llm.classify(exc)}"
+
+    elapsed = time.monotonic() - start
+    parsed = envelope.get("parsed") if isinstance(envelope, dict) else envelope
+    if parsed is None:
+        # The provider accepted the request and ignored the schema. Fatal for
+        # the writer specifically, because RevisionDraft cannot be salvaged
+        # from prose; other tasks would merely degrade.
+        return False, f"{elapsed:6.1f}s  schema: IGNORED (no parse, no salvage)"
+    if not (parsed.suggested_text or "").strip():
+        return False, f"{elapsed:6.1f}s  schema: parsed but suggested_text empty"
+    return True, f"{elapsed:6.1f}s  schema ok"
+
+
 def _time_generation(qualified: str) -> tuple[bool, str]:
     """One realistic generation down the PRODUCTION path.
 
@@ -238,8 +287,16 @@ def _time_generation(qualified: str) -> tuple[bool, str]:
         return False, f"{elapsed:6.1f}s  UNSUITABLE -- {blocker}"
     defects = _writer_quality(text)
     note = f"  quality: {'; '.join(defects)}" if defects else "  quality: clean"
+
+    # Prose is necessary but NOT sufficient -- production never sends prose.
+    schema_ok, schema_detail = _probe_structured(qualified)
+    if not schema_ok:
+        return False, (
+            f"{elapsed:6.1f}s  UNSUITABLE -- {schema_detail.strip()}"
+        )
     return True, (
         f"{elapsed:6.1f}s  {words:>3} words, {out_tokens} tokens{effort_note}{note}"
+        f"  +{schema_detail.strip()}"
     )
 
 
@@ -347,6 +404,8 @@ def main() -> int:
         print("\nNo provider key is set. Add at least one to backend/.env:")
         print("  NVIDIA_API_KEY=...    # build.nvidia.com   (no card, ~40 req/min)")
         print("  GROQ_API_KEY=...      # console.groq.com   (no card, 30 req/min)")
+        print("  CODECRAFT_API_KEY=... # codecraftapi.com   (no card, 60 req/min;")
+        print("                        #  names no upstream vendor -- see .env.example)")
         return 2
 
     # ---------------------------------------------------------------- catalogues
@@ -380,7 +439,10 @@ def main() -> int:
         free = sorted(provider.free_models or ())
         print(f"\n--- {name}: real generation on {len(free)} free model(s) ---")
         print(f"    budget {settings.llm_timeout_seconds}s, no max_tokens, "
-              "same call the app makes\n")
+              "same call the app makes\n"
+              "    each OK model is then re-tested with a json_schema "
+              "response_format,\n"
+              "    because no production call ever sends plain prose\n")
         rows: list[tuple[float, str, str]] = []
         for bare in free:
             qualified = f"{name}:{bare}"
@@ -404,7 +466,10 @@ def main() -> int:
             print("\n  SUITABLE writers -- fewest instruction defects first,")
             print("  latency only as a tiebreak:")
             for n_def, secs, bare, det in rows:
-                q = "clean" if not n_def else det.split("quality: ")[1]
+                # Trim the appended schema verdict -- this line reports
+                # writing defects, and every row here passed the schema probe
+                # by construction.
+                q = "clean" if not n_def else det.split("quality: ")[1].split("  +")[0]
                 print(f"    {secs:6.1f}s  {n_def} defect(s)  {name}:{bare}")
                 if n_def:
                     print(f"             {q}")

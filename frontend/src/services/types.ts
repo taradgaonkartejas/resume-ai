@@ -294,15 +294,6 @@ export type CategoryKey = "contact" | "summary" | "experience" | "format";
  */
 export type StepKey = CategoryKey | "extras";
 
-/** A section heading that is hiding its content from a parser. */
-export interface AtsRelabel {
-  ref: string;
-  current_title: string;
-  /** Empty when no model was available to judge — render nothing. */
-  suggested_title: string;
-  reason: string;
-}
-
 export interface AtsExpansion {
   acronym: string;
   /** Always carries both forms: "Project Management Professional (PMP)". */
@@ -318,7 +309,6 @@ export interface AtsExpansion {
  * Treat "empty" as normal, not as an error.
  */
 export interface AtsReview {
-  relabels: AtsRelabel[];
   expansions: AtsExpansion[];
   note: string;
 }

@@ -548,8 +548,8 @@ def test_analysis_returns_commentary_and_ats_review(client, priya, priya_resume)
     body = client.post(f"/api/resumes/{priya_resume}/analyze", headers=headers).json()
 
     assert set(body["commentary"]) == {"headline", "category_notes"}
-    assert set(body["ats_review"]) == {"relabels", "expansions", "note"}
-    assert isinstance(body["ats_review"]["relabels"], list)
+    assert set(body["ats_review"]) == {"expansions", "note"}
+    assert isinstance(body["ats_review"]["expansions"], list)
     assert isinstance(body["ats_review"]["expansions"], list)
     # Operator data stays server-side.
     assert "trace" not in body
@@ -596,5 +596,5 @@ def test_a_mislabelled_section_reaches_the_client(client, priya):
     )
     headers = {"X-User-Id": priya}
     body = client.post(f"/api/resumes/{resume_id}/analyze", headers=headers).json()
-    assert body["ats_review"]["relabels"] == []
+    assert body["ats_review"]["expansions"] == []
     assert body["ats_review"]["expansions"] == []

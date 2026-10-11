@@ -230,10 +230,36 @@ root, because one shared file is how a server key ends up in a client bundle.
 
 ```bash
 # ---- LLM (optional: the app runs without a key, with degraded features) ----
-UNOROUTER_API_KEY=
-UNOROUTER_BASE_URL=https://api.unorouter.com/v1
-MODEL_DEFAULT=gemini-3.5-flash-lite:free
-EMBEDDING_MODEL=gemini-embedding-2:free
+# One key per provider; at least one, not all. All are free and need no
+# credit card. NVIDIA and Groq do not train on submissions.
+NVIDIA_API_KEY=       # build.nvidia.com  ~40 req/min, no daily token cap
+GROQ_API_KEY=         # console.groq.com  30 req/min, 8k tokens/min
+# Optional, and read ENV-RECOMMENDED.md before setting it: codecraft names
+# no upstream vendor, so you cannot tell whose servers your data reaches.
+# Fine for MODEL_ATS (payload is two acronyms); a real decision for
+# MODEL_WRITING (payload is the whole resume).
+CODECRAFT_API_KEY=    # codecraftapi.com  60 req/min, 1M tokens/month
+# Models are "provider:model". The critic runs on a different vendor from the
+# writer on purpose: a critic sharing the writer's model shares its blind spots.
+#
+# Only set ids that `make models` reports as reachable AND free. An id that is
+# retired or off the free allowlist is skipped silently and the chain falls
+# through -- which, if it lands on the critic's model, destroys that
+# independence without failing anything. This block previously listed
+# kimi-k2.6, nemotron-3-super-120b-a12b and glm-5.3-flash; the first is not on
+# the free allowlist, the second was dropped as the writer, and the third was
+# removed from the chain for burning the full 45s timeout instead of
+# answering. Run `make models` after changing any line here.
+MODEL_DEFAULT=groq:openai/gpt-oss-120b
+MODEL_WRITING=codecraft:claude-sonnet-5
+MODEL_ATS=codecraft:deepseek-v4-pro-0813
+MODEL_CHAT=groq:openai/gpt-oss-120b
+# Must NOT be codecraft while MODEL_WRITING is -- a test enforces that the
+# critic and the writer sit on different providers.
+MODEL_CRITIQUE=groq:openai/gpt-oss-120b
+MODEL_EXTRACTION=groq:openai/gpt-oss-120b
+MODEL_JD_ANALYSIS=groq:openai/gpt-oss-120b
+MODEL_SCORING=groq:openai/gpt-oss-20b
 
 # ---- Database ----
 DATABASE_URL=postgresql+psycopg2://resumeai:resumeai@localhost:5433/resumeai
@@ -264,8 +290,21 @@ cd ../frontend && cp .env.example .env.local
 `make env-file` (`.\make.ps1 env-file` on Windows) will not overwrite an
 existing `.env` — that file holds the only copy of your key.
 
-Get a key at https://unorouter.com (free tier, no card) and paste it into
-`backend/.env`. You can skip this and add it later; the app runs without one.
+Get keys at **https://build.nvidia.com** and **https://console.groq.com**
+(both free, no card) and paste them into `backend/.env`. You can skip this and
+add them later; the app runs without one, with the AI features degraded to the
+deterministic rule engine.
+
+Then prove they work — a key that exists is not a key that is entitled:
+
+```bash
+cd backend && make models
+```
+
+It lists each provider's catalogue and makes one real 1-token call per model.
+A 401 means the key is wrong; a 403 means it authenticates but lacks access to
+that model. Those need completely different fixes, so the tool names which one
+you have.
 
 ---
 

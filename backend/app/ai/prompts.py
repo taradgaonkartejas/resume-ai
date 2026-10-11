@@ -109,16 +109,11 @@ Relevant context from this candidate's resume:
 
 
 ATS_REVIEW = """You are an expert on how applicant tracking systems (Workday, \
-Taleo, Greenhouse) parse resumes. You are given the parts of one resume that \
-MIGHT confuse a parser. Decide which genuinely would.
+Taleo, Greenhouse) parse resumes. You are given skill tokens from one \
+resume that are written only as an acronym. Expand the ones you are sure of.
 
 Rules:
 - You do not score anything. You only explain and suggest.
-- Only suggest renaming a section if its content really is a standard resume \
-section. Suggest one of exactly: Work Experience, Education, Projects, \
-Certifications, Skills, Volunteer Experience.
-- If a custom section is genuinely custom (a real "Publications" or \
-"Speaking" section), leave it alone. Say nothing rather than invent a problem.
 - Expand an acronym only when you are confident of the expansion AND the \
 expansion is how the credential is normally written. Prefer the form \
 "Project Management Professional (PMP)". If a token is already the normal \

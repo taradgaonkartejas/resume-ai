@@ -163,6 +163,43 @@ PROVIDERS: dict[str, Provider] = {
             }
         ),
     ),
+    # 1M tokens/month, 60 req/min, no card, whole catalogue on the free plan.
+    # That rate limit is 60x Groq's effective ~11 req/min and is the reason
+    # this is here at all: `ats-report-llm` was being 429'd mid-run.
+    #
+    # ADDED ON THE USER'S EXPLICIT INSTRUCTION, over a recorded objection.
+    # Three things about this provider are unresolved and a future reader
+    # should not mistake its presence for an endorsement:
+    #
+    #   1. NO json_schema. Their docs list six capabilities and `json_mode`
+    #      is the structured one: `response_format: {"type":"json_object"}`.
+    #      Our structured() asks for method="json_schema". If they 400 on it
+    #      the call dies; if they accept-and-ignore it, the `ok-json` salvage
+    #      rung may recover. Unmeasured -- run `make models-gen-all codecraft`,
+    #      which now probes a real schema, before trusting this for writing.
+    #   2. No upstream provider is named anywhere on the site, and the model
+    #      catalogue is internally inconsistent: `muse-spark-1.1` is described
+    #      as a Meta series while carrying Zhipu's logo, and names like
+    #      `gpt-5.6-terra` and `claude-mythos-preview` are not products those
+    #      vendors ship. Writer and extraction payloads are the user's real
+    #      name, phone, address and employment history.
+    #   3. Because (2) means we cannot tell which upstream model answers,
+    #      two different ids here may be one model behind two labels -- which
+    #      is why the critic stays on a named vendor. See the independence
+    #      rule at the top of this file.
+    #
+    # free_covers_catalogue: their pricing page states every plan, free
+    # included, reaches all models; tiers differ only in volume and rate.
+    "codecraft": Provider(
+        name="codecraft",
+        base_url="https://codecraftapi.com/v1",
+        key_setting="codecraft_api_key",
+        # Unverified vocabulary. Their docs describe `reasoning` as a model
+        # capability but document no reasoning_effort parameter, so send
+        # none rather than risk a 400 on every call.
+        efforts=frozenset(),
+        free_covers_catalogue=True,
+    ),
     # Retained so an existing .env keeps working. Its free tier allows one
     # request per minute per model per account, which is why we moved.
     "unorouter": Provider(
@@ -239,6 +276,18 @@ FALLBACK_CHAIN: list[str] = [
     #
     # ultra-550b-a55b answered the 2026-10-02 probe and is UNVERIFIED for
     # real generation: run `make models-gen-all PROVIDER=nvidia`.
+    #
+    # 2026-10-11: VERIFIED, and it fails. Production log, task=scoring:
+    #
+    #   LLM nvidia:nvidia/nemotron-3-ultra-550b-a55b failed for task scoring
+    #   (timeout): Request timed out.          latency_ms: 45187
+    #
+    # Third model in a row to ping fast and time out on real work, and the
+    # prediction was sitting in this comment the whole time. It is doubly
+    # expensive here: it is MODEL_WRITING *and* the chain's only NVIDIA
+    # entry, so the writer pays 45s directly and every other task pays 45s
+    # on fall-through. Until `models-gen-all` names a replacement that is
+    # OBSERVED to generate, assume this slot is dead weight.
     "nvidia:nvidia/nemotron-3-ultra-550b-a55b",
     "groq:openai/gpt-oss-20b",
 ]
@@ -432,6 +481,19 @@ def classify(exc: Exception) -> str:
     # change. Bucketing it as a plain "error" hides that.
     if status == 410 or "end of life" in text.lower() or "'status': 410" in text:
         return "retired"
+    # 402 is a MONTHLY ALLOWANCE, not a per-minute throttle, and the
+    # difference decides what to do about it. A 429 clears by waiting a few
+    # seconds; a 402 does not clear until the calendar does. codecraft's free
+    # plan is 1M tokens/month and returns 402 once that is spent with no
+    # balance on file.
+    #
+    # Bucketing it as a plain "error" would make an exhausted budget look
+    # exactly like a bad model: run `writer-report-llm` on the 28th of a
+    # heavy month and every codecraft call fails identically to a model that
+    # cannot follow instructions. That is the precise confusion this function
+    # exists to prevent -- see the docstring.
+    if status == 402 or "payment required" in text.lower() or "insufficient" in text.lower():
+        return "quota_exhausted"
     if "RateLimit" in name or status == 429 or "Too many requests" in text:
         return "rate_limited"
     if "Timeout" in name or "timed out" in text.lower():

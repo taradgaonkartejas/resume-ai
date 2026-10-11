@@ -1,11 +1,13 @@
-.venv/
-__pycache__/
-*.pyc
-.pytest_cache/
-.ruff_cache/
-node_modules/
-dist/
-.env
+# Runtime artefacts. ROOT_DIR/data is where the local S3 fallback writes
+# uploads and exports and where LangGraph keeps its SQLite checkpoints
+# (see backend/app/config.py and backend/app/db.py). None of it is source.
+#
+# This file exists because it did not, and the directory had grown to 110 MB
+# of test detritus -- 799 uploaded fixtures, 2,292 generated exports and an
+# 85 MB checkpoint database -- all of it commit-eligible. Uploads are resume
+# files; on a real run they are somebody's name, phone number and employment
+# history, which is the last thing that should reach a public repository.
 data/
+
+# Local SQLite fallback databases.
 *.db
-.DS_Store

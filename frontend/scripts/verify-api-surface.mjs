@@ -187,8 +187,9 @@ await expectStatus(api.get(`/resumes/${blank.id}/analysis`), 404, "GET /analysis
 const an = (await api.post(`/resumes/${BASE_ID}/analyze`)).data;
 hasFields(an, ["id", "resume_id", "overall_score", "category_scores", "role_tags", "commentary", "ats_review", "created_at"], "POST /analyze");
 hasFields(an.commentary, ["headline", "category_notes"], "commentary shape");
-hasFields(an.ats_review, ["relabels", "expansions", "note"], "ats_review shape");
-ok(Array.isArray(an.ats_review.relabels) && Array.isArray(an.ats_review.expansions), "ats_review lists are arrays");
+hasFields(an.ats_review, ["expansions", "note"], "ats_review shape");
+ok(Array.isArray(an.ats_review.expansions), "ats_review expansions is an array");
+ok(an.ats_review.relabels === undefined, "ats_review.relabels is gone (feature deleted 2026-10-11)");
 // Operator data -- node names, model ids, latencies -- stays server-side.
 ok(an.trace === undefined, "trace is not exposed to the client");
 const cats = Object.keys(an.category_scores).sort();

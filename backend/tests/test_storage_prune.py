@@ -13,14 +13,19 @@ import argparse
 import pytest
 
 from app import cli
-from app.db import DATA_DIR
 
 
 @pytest.fixture
-def planted(client, priya):
-    """A live upload plus one fixture, one orphan and one export."""
-    up = DATA_DIR / "resumeai-uploads"
-    ex = DATA_DIR / "resumeai-exports"
+def planted(client, priya, _isolated_data_dir):
+    """A live upload plus one fixture, one orphan and one export.
+
+    Takes the sandbox from the fixture rather than importing DATA_DIR. A
+    module-level `from app.db import DATA_DIR` binds the REAL path at import
+    time, before any fixture runs -- so this file used to write its fixtures
+    into the real data directory while the CLI under test read the sandbox.
+    """
+    up = _isolated_data_dir / "resumeai-uploads"
+    ex = _isolated_data_dir / "resumeai-exports"
 
     res = client.post(
         "/api/resumes/upload",
@@ -100,11 +105,18 @@ def test_keep_orphans_prunes_only_fixtures(planted):
     assert planted["live"].exists()
 
 
-def test_the_live_upload_is_still_readable_after_a_full_prune(planted, client, priya):
+def test_the_live_upload_is_still_readable_after_a_full_prune(
+    planted, client, priya, _isolated_data_dir
+):
     from app.services import storage
 
     cli.cmd_storage_prune(_args(force=True, exports=True))
-    key = str(planted["live"].relative_to(DATA_DIR / "resumeai-uploads"))
+    # The key as the DB stores it. Derived from the sandbox root rather than
+    # by counting `.parents`, which is off-by-one the moment a key gains or
+    # loses a path component.
+    key = planted["live"].relative_to(
+        _isolated_data_dir / "resumeai-uploads"
+    ).as_posix()
     assert storage.get_object("resumeai-uploads", key).startswith(b"Jane Doe")
 
 

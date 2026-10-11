@@ -92,15 +92,6 @@ class ParseStatusOut(BaseModel):
 
 
 # ---------- analysis ----------
-class AtsRelabelOut(BaseModel):
-    """A section whose heading is hiding its content from a parser."""
-
-    ref: str = ""
-    current_title: str = ""
-    suggested_title: str = ""
-    reason: str = ""
-
-
 class AtsExpansionOut(BaseModel):
     acronym: str = ""
     expanded: str = ""
@@ -109,7 +100,6 @@ class AtsExpansionOut(BaseModel):
 class AtsReviewOut(BaseModel):
     """Advisory machine-readability notes. Never affects the score."""
 
-    relabels: list[AtsRelabelOut] = Field(default_factory=list)
     expansions: list[AtsExpansionOut] = Field(default_factory=list)
     note: str = ""
 

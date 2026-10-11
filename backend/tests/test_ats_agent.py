@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from app.ai import agents, graphs
-from app.ai.schemas import AtsReview, SectionRelabel, SkillExpansion
+from app.ai.schemas import AtsReview, SkillExpansion
 from app.services import ats
 
 CLEAN = {
@@ -43,7 +43,6 @@ MESSY = {
 
 # ------------------------------------------------------------------ the gate
 def test_clean_resume_asks_nothing():
-    assert ats.mislabelled_sections(CLEAN) == []
     assert ats.bare_acronyms(CLEAN) == []
 
 
@@ -55,13 +54,10 @@ def test_clean_resume_never_calls_a_model(monkeypatch):
     monkeypatch.setattr(agents.llm, "structured", explode)
     out = agents.review_ats(CLEAN)
     assert out.used_llm is False
-    assert out.value == {"relabels": [], "expansions": [], "note": ""}
+    assert out.value == {"expansions": [], "note": ""}
 
 
 def test_candidates_are_found_when_present():
-    sections = ats.mislabelled_sections(MESSY)
-    assert [s["title"] for s in sections] == ["My Journey"]
-    assert sections[0]["ref"] == "extras_0"
     assert ats.bare_acronyms(MESSY) == ["PMP", "CKA"]
 
 
@@ -70,64 +66,15 @@ def test_real_technology_names_are_not_treated_as_acronyms():
     assert ats.bare_acronyms(data) == []
 
 
-def test_a_custom_section_without_dates_is_left_alone():
-    data = {**CLEAN, "extras": [{
-        "kind": "custom", "title": "Speaking",
-        "entries": [{"primary": "PyCon talk", "secondary": "", "date": "", "detail": ""}],
-    }]}
-    assert ats.mislabelled_sections(data) == []
-
-
-def test_a_known_extras_kind_is_never_a_candidate():
-    data = {**CLEAN, "extras": [{
-        "kind": "certifications", "title": "Certifications",
-        "entries": [{"primary": "AWS SA", "secondary": "", "date": "2021", "detail": ""}],
-    }]}
-    assert ats.mislabelled_sections(data) == []
-
-
 # --------------------------------------------------------------- the guard
 def _review(**kw) -> AtsReview:
     return AtsReview(**kw)
 
 
-def test_relabel_to_an_invented_section_is_dropped():
-    sections = ats.mislabelled_sections(MESSY)
-    out = agents._clean_ats_review(
-        _review(relabels=[SectionRelabel(
-            ref="extras_0", suggested_title="Vibes", reason="x")]),
-        sections, [],
-    )
-    assert out["relabels"] == []
-
-
-def test_relabel_of_a_section_we_never_mentioned_is_dropped():
-    sections = ats.mislabelled_sections(MESSY)
-    out = agents._clean_ats_review(
-        _review(relabels=[SectionRelabel(
-            ref="extras_7", suggested_title="Work Experience", reason="x")]),
-        sections, [],
-    )
-    assert out["relabels"] == []
-
-
-def test_a_valid_relabel_survives_and_carries_the_original_title():
-    sections = ats.mislabelled_sections(MESSY)
-    out = agents._clean_ats_review(
-        _review(relabels=[SectionRelabel(
-            ref="extras_0", suggested_title="Work Experience", reason="Holds jobs.")]),
-        sections, [],
-    )
-    assert out["relabels"] == [{
-        "ref": "extras_0", "current_title": "My Journey",
-        "suggested_title": "Work Experience", "reason": "Holds jobs.",
-    }]
-
-
 def test_expansion_of_an_acronym_not_on_the_resume_is_dropped():
     out = agents._clean_ats_review(
         _review(expansions=[SkillExpansion(acronym="AWS", expanded="Amazon Web Services")]),
-        [], ["PMP"],
+        ["PMP"],
     )
     assert out["expansions"] == []
 
@@ -136,7 +83,7 @@ def test_expansion_keeps_both_forms():
     out = agents._clean_ats_review(
         _review(expansions=[SkillExpansion(
             acronym="PMP", expanded="Project Management Professional")]),
-        [], ["PMP"],
+        ["PMP"],
     )
     assert out["expansions"] == [
         {"acronym": "PMP", "expanded": "Project Management Professional (PMP)"}
@@ -145,7 +92,7 @@ def test_expansion_keeps_both_forms():
 
 def test_an_expansion_that_does_not_expand_is_dropped():
     out = agents._clean_ats_review(
-        _review(expansions=[SkillExpansion(acronym="PMP", expanded="PMP")]), [], ["PMP"],
+        _review(expansions=[SkillExpansion(acronym="PMP", expanded="PMP")]), ["PMP"],
     )
     assert out["expansions"] == []
 
@@ -154,23 +101,23 @@ def test_a_double_wrapped_acronym_is_not_produced():
     out = agents._clean_ats_review(
         _review(expansions=[SkillExpansion(
             acronym="PMP", expanded="Project Management Professional (PMP)")]),
-        [], ["PMP"],
+        ["PMP"],
     )
     assert out["expansions"][0]["expanded"].count("PMP") == 1
 
 
 # ------------------------------------------------------------- degradation
 def test_without_a_key_the_feature_goes_quiet_rather_than_guessing():
-    """Measured, not assumed: the rule version gave bad advice on a real CV.
+    """With no model there is no advice -- acronyms need judgement too.
 
-    It told a genuine "Leadership & Achievements" section to rename itself,
-    because that section is structurally identical to a work history hiding
-    under a creative heading. Distinguishing them is the judgement call, so
-    with no model there is no advice.
+    The sibling half of this feature (section relabelling) was deleted after
+    it failed a pre-registered false-positive gate; see `_rule_ats_review`.
+    What is left still refuses to guess: a wrong expansion is a fabricated
+    credential on someone's resume.
     """
     out = agents.review_ats(MESSY)
     assert out.used_llm is False
-    assert out.value == {"relabels": [], "expansions": [], "note": ""}
+    assert out.value == {"expansions": [], "note": ""}
 
 
 def test_a_model_failure_falls_back_rather_than_raising(monkeypatch):
@@ -181,7 +128,7 @@ def test_a_model_failure_falls_back_rather_than_raising(monkeypatch):
     )
     out = agents.review_ats(MESSY)
     assert out.used_llm is False
-    assert out.value["relabels"] == []
+    assert out.value["expansions"] == []
 
 
 # ------------------------------------------------------------- prose salvage
@@ -217,4 +164,4 @@ def test_the_score_is_identical_with_and_without_the_agent():
 def test_graph_always_produces_a_review(data):
     state = graphs.run_analysis(data)
     assert "ats_review" in state
-    assert set(state["ats_review"]) == {"relabels", "expansions", "note"}
+    assert set(state["ats_review"]) == {"expansions", "note"}

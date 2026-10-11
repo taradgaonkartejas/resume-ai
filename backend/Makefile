@@ -21,7 +21,7 @@ PY := $(shell \
 
 .PHONY: writer-report writer-report-llm help up down logs ps doctor which-python env env-file env-update db-push db-status db-seed db-reset \
         db-inspect db-sql db-create db-drop migrate migrate-deploy migrate-status \
-        migrate-down test lint run test-live cov env-check models models-probe models-gen models-gen-all critic-report critic-report-llm ats-report ats-report-llm ats-report-holdout storage-status storage-verify storage-prune storage-prune-hard
+        migrate-down test lint run test-live cov env-check models models-probe models-gen models-gen-all critic-report critic-report-llm ats-report ats-report-llm storage-status storage-verify storage-prune storage-prune-dry storage-prune-hard
 
 help:
 	@echo "Services (docker compose, run from the repo root)"
@@ -68,11 +68,11 @@ help:
 	@echo "                           (PROVIDER=nvidia|groq, takes a few minutes)"
 	@echo "  make storage-status      classify everything under data/"
 	@echo "  make storage-verify      report resumes whose uploaded file is missing"
+	@echo "  make storage-prune-dry   show what would be deleted, delete nothing"
 	@echo "  make storage-prune       delete fixtures + orphans (keeps live + exports)"
 	@echo "  make storage-prune-hard  ... and exports too"
 	@echo "  make ats-report          check the ATS gate offline (free)"
-	@echo "  make ats-report-llm      score ATS judgement, dev split (3 runs)"
-	@echo "  make ats-report-holdout  the measurement that counts -- run ONCE"
+	@echo "  make ats-report-llm      score acronym expansions live (3 runs)"
 	@echo "  make critic-report       score the rule critic offline"
 	@echo "  make critic-report-llm   ... and the live LLM critic (paced; ~1 min)"
 
@@ -206,6 +206,9 @@ storage-status:
 storage-verify:
 	$(PY) -m app.cli storage verify
 
+storage-prune-dry:
+	$(PY) -m app.cli storage prune
+
 storage-prune:
 	$(PY) -m app.cli storage prune --force
 
@@ -217,9 +220,6 @@ ats-report:
 
 ats-report-llm:
 	$(PY) -m scripts.ats_report --llm --runs 3 --sleep 2
-
-ats-report-holdout:
-	$(PY) -m scripts.ats_report --llm --holdout --runs 3 --sleep 2
 
 writer-report:
 	$(PY) -m scripts.writer_report

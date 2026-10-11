@@ -184,6 +184,8 @@ def test_no_key_raises_before_any_client_is_built(_no_provider_keys, monkeypatch
     "exc,expected",
     [
         (_Status(410, "this model is at end of life"), "retired"),
+        (_Status(402, "Payment Required"), "quota_exhausted"),
+        (_Status(402, "insufficient balance for this request"), "quota_exhausted"),
         (_Status(429, "Too many requests"), "rate_limited"),
         (TimeoutError("request timed out"), "timeout"),
         (RuntimeError("upstream connect error"), "transient"),
@@ -197,6 +199,34 @@ def test_classify_buckets_failures_by_kind(exc, expected):
     Collapsing these let a transport problem masquerade as a quality verdict.
     """
     assert llm.classify(exc) == expected
+
+
+def test_an_exhausted_monthly_budget_is_not_a_rate_limit():
+    """402 and 429 need opposite responses, so they cannot share a bucket.
+
+    A 429 clears in seconds and `structured()` will wait it out on the same
+    model. A 402 means the month's allowance is gone and waiting is useless;
+    the only useful move is falling through to another vendor. codecraft's
+    free plan is 1M tokens/month, which measurement puts inside the plausible
+    range for heavy use -- so this is a case this project will actually hit,
+    not a hypothetical.
+    """
+    assert llm.classify(_Status(402, "Payment Required")) == "quota_exhausted"
+    assert llm.classify(_Status(402, "Payment Required")) != "rate_limited"
+    # And it must not be a bare "error", or an exhausted budget on the 28th
+    # reads identically to a model that cannot follow instructions.
+    assert llm.classify(_Status(402, "Payment Required")) != "error"
+
+
+def test_only_a_rate_limit_triggers_the_wait_and_retry():
+    """Pins the behaviour that makes the distinction worth drawing."""
+    import inspect
+    src = inspect.getsource(llm.structured)
+    assert 'kind == "rate_limited"' in src, (
+        "the wait-and-retry branch changed; confirm quota_exhausted still "
+        "falls straight through rather than sleeping"
+    )
+    assert 'kind == "quota_exhausted"' not in src
 
 
 def test_a_retired_model_is_tried_once_and_not_retried(keyed, chain, monkeypatch):

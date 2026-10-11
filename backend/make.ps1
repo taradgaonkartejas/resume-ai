@@ -142,7 +142,7 @@ function Show-Help {
     Write-Host "  backend\.env is THIS directory's config and holds real secrets." -ForegroundColor DarkGray
     Write-Host "  The browser app is configured separately in frontend\.env.local." -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host "AI transport (needs UNOROUTER_API_KEY in backend\.env)" -ForegroundColor Yellow
+    Write-Host "AI transport (needs NVIDIA_API_KEY / GROQ_API_KEY in backend\.env)" -ForegroundColor Yellow
     Write-Host "  models              which models the key can actually call"
     Write-Host "  cov                 coverage, hermetic (no API calls)"
     Write-Host "  test-live           ALSO run tests that call real providers"
@@ -150,8 +150,19 @@ function Show-Help {
     Write-Host "  models-gen          time a REAL ~40-word generation per task"
     Write-Host "  models-gen-all [prov] real generation on EVERY free model"
     Write-Host "  models-probe [prov] probe EVERY model a provider advertises"
+    Write-Host "  writer-report       score the rule writer offline"
+    Write-Host "  writer-report-llm   ... and the live LLM writer (paced)"
+    Write-Host "  ats-report          check the ATS gate offline (free)"
+    Write-Host "  ats-report-llm      score acronym expansions live (3 runs)"
     Write-Host "  critic-report       score the rule critic offline"
     Write-Host "  critic-report-llm   ... and the live LLM critic (paced; ~1 min)"
+    Write-Host ""
+    Write-Host "Local object storage (data\\ at the repo root)"
+    Write-Host "  storage-status      classify everything: live / orphan / fixture / export"
+    Write-Host "  storage-verify      resumes whose uploaded file is MISSING"
+    Write-Host "  storage-prune-dry   show what would be deleted, delete nothing"
+    Write-Host "  storage-prune       delete fixtures + orphans (keeps live + exports)"
+    Write-Host "  storage-prune-hard  ... and exports too"
     Write-Host ""
     Write-Host "Schema (app/models.py is the source of truth)" -ForegroundColor Yellow
     Write-Host "  db-push         create database + tables to match the models"
@@ -256,6 +267,15 @@ switch ($Target.ToLowerInvariant()) {
         # answered, not from what looked plausible.
         Invoke-Py @('-m', 'scripts.check_model_access', '--probe', $Provider)
     }
+    'storage-status'      { Invoke-Cli @('storage', 'status') }
+    'storage-verify'      { Invoke-Cli @('storage', 'verify') }
+    'storage-prune'       { Invoke-Cli @('storage', 'prune', '--force') }
+    'storage-prune-dry'   { Invoke-Cli @('storage', 'prune') }
+    'storage-prune-hard'  { Invoke-Cli @('storage', 'prune', '--force', '--exports') }
+
+    'ats-report'          { Invoke-Py @('-m', 'scripts.ats_report') }
+    'ats-report-llm'      { Invoke-Py @('-m', 'scripts.ats_report', '--llm', '--runs', '3', '--sleep', '2') }
+
     'critic-report'  { Invoke-Py @('-m', 'scripts.critic_report') }
     'writer-report' { Invoke-Py @('-m', 'scripts.writer_report') }
     'writer-report-llm' { Invoke-Py @('-m', 'scripts.writer_report', '--llm', '--sleep', '3') }

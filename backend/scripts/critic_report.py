@@ -72,7 +72,7 @@ def main() -> int:
     if use_llm and not llm.is_configured():
         print("No provider API key is set -- cannot score the LLM critic.")
         print("Set at least one of NVIDIA_API_KEY / GROQ_API_KEY / "
-              "UNOROUTER_API_KEY in backend/.env.")
+              "CODECRAFT_API_KEY / UNOROUTER_API_KEY in backend/.env.")
         return 2
 
     model = llm.resolve_chain("critique")[0] if use_llm else "-"

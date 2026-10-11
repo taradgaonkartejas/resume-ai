@@ -8,7 +8,7 @@ resort. See app/ai/prose.py for why that is a salvage path and not a parser.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.ai import prose
 
@@ -25,13 +25,45 @@ class JDAnalysis(BaseModel):
     keywords: list[ExtractedKeyword] = Field(default_factory=list)
 
 
+class CategoryNotes(BaseModel):
+    """The four scoring categories as EXPLICIT fields, not a free-form dict.
+
+    `dict[str, str]` renders as `{"type": "object", "additionalProperties":
+    {"type": "string"}}`, and Groq's strict json_schema mode rejects that
+    outright:
+
+        invalid JSON schema for response_format: 'ScoringCommentary':
+        /properties/category_notes: `additionalProperties:false` must be
+        set on every object
+
+    An open-ended map cannot satisfy that rule by construction -- its whole
+    point is that the keys are not known ahead of time. Here they always
+    were: the rule engine scores exactly these four categories and nothing
+    else, so the dict was never buying flexibility, only an unprovable
+    schema. Naming the fields costs nothing and makes the contract real.
+
+    This failed on EVERY model in the chain, so there was no fallback: the
+    scoring agent silently degraded to rule-engine commentary on every
+    single analysis, and the only trace was a line in the server log.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    contact: str = ""
+    summary: str = ""
+    experience: str = ""
+    format: str = ""
+
+
 class ScoringCommentary(BaseModel):
     """Prose only. The numbers come from the rule engine."""
 
+    model_config = ConfigDict(extra="forbid")
+
     headline: str = Field(description="One-sentence verdict")
-    category_notes: dict[str, str] = Field(
-        default_factory=dict,
-        description="Per-category advice keyed by contact, summary, experience, format",
+    category_notes: CategoryNotes = Field(
+        default_factory=CategoryNotes,
+        description="Per-category advice for contact, summary, experience, format",
     )
 
 
@@ -121,13 +153,6 @@ class CriticBatch(BaseModel):
 
 
 
-class SectionRelabel(BaseModel):
-    ref: str = ""
-    current_title: str = ""
-    suggested_title: str = ""
-    reason: str = ""
-
-
 class SkillExpansion(BaseModel):
     acronym: str = ""
     expanded: str = ""
@@ -143,7 +168,6 @@ class AtsReview(BaseModel):
     worth having: the worst case for a misread is one unhelpful tip.
     """
 
-    relabels: list[SectionRelabel] = Field(default_factory=list)
     expansions: list[SkillExpansion] = Field(default_factory=list)
     note: str = ""
 

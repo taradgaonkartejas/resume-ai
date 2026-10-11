@@ -73,6 +73,52 @@ def _no_provider_keys(request, monkeypatch):
         monkeypatch.setattr(settings, provider.key_setting, "", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_data_dir(tmp_path, monkeypatch):
+    """No test may write into the real `data/` directory.
+
+    This is the fixture that should have existed from the start. Without it
+    the suite writes its fixtures into the SAME directory that holds real
+    uploads and exports, which caused, in order:
+
+      * `storage prune` being unable to answer "is this file junk?", because
+        `cv.txt` and a candidate's actual resume sat side by side;
+      * a restored upload being silently overwritten by a `pytest` run, twice,
+        while the restore was still being verified;
+      * ultimately a blanket `rm -rf` of the whole directory, because the
+        contents had become indistinguishable.
+
+    `DATA_DIR` is imported as `from app.db import DATA_DIR` in two modules,
+    so the name is bound in each of their namespaces at import time. Patching
+    only `app.db.DATA_DIR` would leave `storage` and `graphs` still pointing
+    at the real path -- the fix has to rebind every holder, which is why the
+    list below is explicit and why the test beneath it exists.
+
+    tmp_path is function-scoped, so tests are also isolated from each other.
+    """
+    import app.config as config_mod
+    import app.db as db_mod
+    from app.ai import graphs as graphs_mod
+    from app.services import storage as storage_mod
+
+    sandbox = tmp_path / "data"
+    sandbox.mkdir(parents=True, exist_ok=True)
+    for module in (db_mod, storage_mod, graphs_mod):
+        monkeypatch.setattr(module, "DATA_DIR", sandbox, raising=True)
+
+    # app/cli.py deliberately does NOT import DATA_DIR -- importing app.db
+    # builds the engine at module scope, which the storage commands have to
+    # survive -- so it derives `ROOT_DIR / "data"` instead. That is a second,
+    # independent route to the same directory, and patching only DATA_DIR
+    # left it pointing at the real one: the CLI read the sandbox while the
+    # tests wrote to the real path, which both leaked files AND failed.
+    #
+    # Safe to patch: ROOT_DIR has no consumer in app/ other than these data
+    # paths. cli.py imports it inside each function, so it sees this.
+    monkeypatch.setattr(config_mod, "ROOT_DIR", tmp_path, raising=True)
+    return sandbox
+
+
 @pytest.fixture(scope="function")
 def client(monkeypatch):
     """Isolated in-memory database per test.

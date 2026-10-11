@@ -152,47 +152,6 @@ def out_of_order_experience(data: dict) -> bool:
 # the writer used a heading our classifier -- and therefore a real ATS, which
 # matches on the same kind of vocabulary -- did not recognise. Non-standard
 # section labels are ~17% of field-level parse errors.
-_JOBLIKE_KEYS = ("primary", "secondary", "detail")
-
-
-def mislabelled_sections(data: dict) -> list[dict]:
-    """Custom sections whose *content* looks like a standard resume section.
-
-    "My Journey", "Where I've Been", "Career Highlights" are all real headings
-    people use, and all of them hide the work history from a parser that is
-    matching on the word "Experience". We can see cheaply that a section is
-    custom and that its entries carry dates and employer-shaped text; deciding
-    *which* standard section it should be is the agent's call.
-    """
-    out: list[dict] = []
-    for index, section in enumerate(data.get("extras") or []):
-        if not isinstance(section, dict) or section.get("kind") != "custom":
-            continue
-        entries = [e for e in (section.get("entries") or []) if isinstance(e, dict)]
-        if not entries:
-            continue
-        dated = sum(1 for e in entries if str(e.get("date") or "").strip())
-        filled = sum(
-            1 for e in entries if any(str(e.get(k) or "").strip() for k in _JOBLIKE_KEYS)
-        )
-        if dated and filled >= len(entries) * 0.5:
-            out.append(
-                {
-                    "ref": f"extras_{index}",
-                    "title": str(section.get("title") or "").strip(),
-                    "sample": [
-                        " — ".join(
-                            str(e.get(k) or "").strip()
-                            for k in _JOBLIKE_KEYS
-                            if str(e.get(k) or "").strip()
-                        )
-                        for e in entries[:3]
-                    ],
-                }
-            )
-    return out
-
-
 # Workday indexes an acronym and its expansion as different tokens, so a
 # recruiter searching "Project Management Professional" does not match a
 # resume that only says "PMP". The fix is to carry both -- "Project Management

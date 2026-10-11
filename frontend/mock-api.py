@@ -232,7 +232,7 @@ def analysis_for(r, refresh=False):
         # renders both conditionally, and "absent" and "nothing to say" must
         # not look alike to it.
         "commentary": {"headline": "", "category_notes": {}},
-        "ats_review": {"relabels": [], "expansions": [], "note": ""},
+        "ats_review": {"expansions": [], "note": ""},
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     ANALYSES[r["id"]] = row

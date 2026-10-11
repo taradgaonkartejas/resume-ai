@@ -106,6 +106,21 @@ def analyse_jd(
 
 
 # ------------------------------------------------------------- scoring agent
+def _notes_or(notes, fallback: dict) -> dict:
+    """Per-category prose, falling back per key rather than wholesale.
+
+    `category_notes` used to be a dict and `parsed.category_notes or
+    fallback` was enough. It is a model now -- Groq's strict json_schema
+    mode rejects open-ended maps -- and a model is ALWAYS truthy, so that
+    expression would have quietly shipped the model object and never once
+    used the fallback. Falling back per key is also better than all-or-
+    nothing: a model that writes three good notes and omits the fourth
+    should keep the three.
+    """
+    written = {k: v.strip() for k, v in notes.model_dump().items() if v and v.strip()}
+    return {**fallback, **written}
+
+
 def score_commentary(
     structured_data: dict, rule_result: dict, store: VectorStore | None = None
 ) -> AgentOutcome:
@@ -147,7 +162,9 @@ def score_commentary(
             return AgentOutcome(
                 value={
                     "headline": parsed.headline,
-                    "category_notes": parsed.category_notes or fallback_notes,
+                    "category_notes": _notes_or(
+                        parsed.category_notes, fallback_notes
+                    ),
                 },
                 agent="scoring",
                 model=call.model,
@@ -1013,17 +1030,7 @@ _STRONGER = {
 
 
 
-# ---------------------------------------------------------------- chat agent
-
 # ----------------------------------------------------------------- ats agent
-_STANDARD_SECTIONS = {
-    "work experience",
-    "education",
-    "projects",
-    "certifications",
-    "skills",
-    "volunteer experience",
-}
 
 
 def review_ats(
@@ -1032,30 +1039,32 @@ def review_ats(
     """Judgement calls about machine-readability. Advisory, never scored.
 
     The deterministic checks in `services/ats.py` own every point this
-    feature is worth. This agent exists for the two questions that rules
-    genuinely cannot answer -- is this oddly-named section actually the work
-    history, and what does this acronym stand for -- and its output is
-    presented as tips, not findings.
+    feature is worth. This agent exists for the one question that rules
+    genuinely cannot answer -- what does this acronym stand for -- and its
+    output is presented as tips, not findings.
+
+    It used to answer a second question (is this oddly-named section really
+    the work history?). That half failed its pre-registered false-positive
+    gate on a real resume and was deleted; see `_rule_ats_review`.
 
     Keeping it out of the score is the whole design, not a limitation. A
     score that moved because a model felt differently on a Tuesday would be
     unreproducible, unexplainable, and impossible to test; the same reason
     ScoringAgent is forbidden from touching the number.
     """
-    sections = ats_rules.mislabelled_sections(structured_data)
     acronyms = ats_rules.bare_acronyms(structured_data)
 
     # The gate. No question, no call -- a tidy resume costs nothing.
-    if not sections and not acronyms:
+    if not acronyms:
         return AgentOutcome(
-            value={"relabels": [], "expansions": [], "note": ""},
+            value={"expansions": [], "note": ""},
             agent="ats",
             notes=["no candidates"],
         )
 
     if not llm.is_configured():
         return AgentOutcome(
-            value=_rule_ats_review(sections, acronyms),
+            value=_rule_ats_review(),
             agent="ats",
             notes=["rule-engine ats review"],
         )
@@ -1070,17 +1079,7 @@ def review_ats(
         except Exception as exc:  # noqa: BLE001
             logger.warning("ATS retrieval failed: %s", exc)
 
-    payload_parts = []
-    if sections:
-        payload_parts.append(
-            "Custom sections that contain dated, job-shaped entries:\n"
-            + "\n".join(
-                f"- ref={s['ref']} title={s['title']!r} entries={s['sample']}"
-                for s in sections
-            )
-        )
-    if acronyms:
-        payload_parts.append("Skills written only as an acronym:\n" + ", ".join(acronyms))
+    payload_parts = ["Skills written only as an acronym:\n" + ", ".join(acronyms)]
 
     try:
         parsed, call = llm.structured(
@@ -1091,7 +1090,7 @@ def review_ats(
             temperature=0.2,
         )
         return AgentOutcome(
-            value=_clean_ats_review(parsed, sections, acronyms),
+            value=_clean_ats_review(parsed, acronyms),
             agent="ats",
             model=call.model,
             latency_ms=call.latency_ms,
@@ -1103,36 +1102,20 @@ def review_ats(
         logger.warning("ATS agent fell back to rules: %s", exc)
 
     return AgentOutcome(
-        value=_rule_ats_review(sections, acronyms),
+        value=_rule_ats_review(),
         agent="ats",
         notes=["rule-engine ats review"],
     )
 
 
-def _clean_ats_review(parsed: AtsReview, sections: list[dict], acronyms: list[str]) -> dict:
+def _clean_ats_review(parsed: AtsReview, acronyms: list[str]) -> dict:
     """Keep only what the model was actually asked about.
 
     The same discipline as `_hard_check` on the writer path, for the same
     reason: every fabrication we have ever caught in this codebase was caught
     by a deterministic guard, never by a model policing itself. Here that
-    means a relabel must name a section we supplied and a standard target,
-    and an expansion must be of an acronym that is really on the resume.
+    means an expansion must be of an acronym that is really on the resume.
     """
-    known = {s["ref"]: s["title"] for s in sections}
-    relabels = []
-    for item in parsed.relabels or []:
-        ref = (item.ref or "").strip()
-        target = (item.suggested_title or "").strip()
-        if ref in known and target.lower() in _STANDARD_SECTIONS:
-            relabels.append(
-                {
-                    "ref": ref,
-                    "current_title": known[ref],
-                    "suggested_title": target,
-                    "reason": (item.reason or "").strip()[:240],
-                }
-            )
-
     allowed = {a.upper() for a in acronyms}
     expansions = []
     for item in parsed.expansions or []:
@@ -1146,37 +1129,54 @@ def _clean_ats_review(parsed: AtsReview, sections: list[dict], acronyms: list[st
             )
 
     return {
-        "relabels": relabels,
         "expansions": expansions,
         "note": (parsed.note or "").strip()[:400],
     }
 
 
-def _rule_ats_review(sections: list[dict], acronyms: list[str]) -> dict:
-    """No model available: say nothing. Both halves need judgement.
+def _rule_ats_review() -> dict:
+    """No model available: say nothing. The remaining half needs judgement.
 
-    This started out flagging the sections and staying quiet only about the
-    acronyms, on the theory that "a custom heading full of dated entries" was
-    something we had already established without a model. Running it over a
-    real resume killed that theory immediately: it flagged
+    This function once had a twin for section relabelling -- spotting that
+    "My Journey" is really the work history and a parser matching on the word
+    "Experience" will miss it. That half has been DELETED, on evidence.
 
-        "Leadership & Achievements"  ->  rename this to a standard heading
+    The rule version went first. It flagged
 
-    on a section that is genuinely a leadership-and-achievements section and
-    should keep its name. The shape we can detect -- dated entries, employer-
-    shaped text -- is identical for "My Journey" (really the work history, a
-    serious parse problem) and for that one (fine as it is). Telling the two
-    apart IS the judgement call, which is precisely why this is an agent and
-    not a rule.
+        "Leadership & Achievements"  ->  rename to a standard heading
 
-    So with no model there is no advice. The deterministic ATS findings in
-    services/ats.py are unaffected and still score; this feature simply goes
-    quiet, which is the correct way for an advisory layer to degrade. Bad
-    advice is worse than none, and renaming a section on our say-so is a
-    change the user would have to undo by hand.
+    on a real resume, where that is a genuine leadership-and-achievements
+    section that should keep its name. The detectable shape -- dated entries,
+    employer-shaped text -- is identical for "My Journey" (a serious parse
+    problem) and for that one (fine as it is). Telling them apart IS the
+    judgement call, so the work moved to the agent.
+
+    The agent then scored, on a pre-registered corpus with a holdout:
+
+        recall on positives       100%
+        FALSE POSITIVES           1/6 = 17%   (kill criterion: max 10%)
+        correct target when fired 100%
+
+    and the single false positive was that same "Leadership & Achievements"
+    section, on 3 runs out of 3. The threshold was registered BEFORE the run
+    precisely so this could not be argued away afterwards, and the measured
+    rate is a floor: a rate-limited call degrades to this function, returns
+    nothing, and scores as a correct negative.
+
+    Recall was perfect. The feature worked when it should fire. It was
+    deleted anyway, because the baseline it had to beat is silence, and a
+    tool that tells you to rename a section you deliberately wrote is worse
+    than no tool -- you have to notice it is wrong and undo it. 100% recall
+    does not buy the right to be confidently wrong about a real resume.
+
+    Acronym expansion survives: it scored 6 correct, 0 wrong, 0 fabricated,
+    and it is checkable against the resume text, which relabelling is not.
+
+    The deterministic ATS findings in services/ats.py are unaffected and
+    still score.
     """
-    return {"relabels": [], "expansions": [], "note": ""}
-
+    return {"expansions": [], "note": ""}
+# ---------------------------------------------------------------- chat agent
 
 
 def chat_reply(
