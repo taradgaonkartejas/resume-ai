@@ -16,6 +16,7 @@ from app.services import storage
 from app.services.exceptions import ResumeNotFound, ValidationError
 from app.services.resume_ops import (
     EXTRA_PRESETS,
+    _known_host,
     empty_extra_entry,
     empty_resume,
     migrate,
@@ -26,6 +27,14 @@ logger = logging.getLogger(__name__)
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
 _PHONE_RE = re.compile(r"(\+?\d[\d\s().-]{7,}\d)")
 _LINK_RE = re.compile(r"(https?://\S+|linkedin\.com/\S+|github\.com/\S+)", re.I)
+#: Separators used between fields on a contact line.
+_CONTACT_SEP_RE = re.compile(r"\s*[•·|]\s*|\s{2,}|\s+[-–—]\s+")
+#: Bare anchor words that stand in for a link, so they are not a location.
+_LINK_WORDS = {
+    "linkedin", "github", "gitlab", "portfolio", "website", "resume", "cv",
+    "blog", "medium", "twitter", "x", "stack overflow", "stackoverflow",
+    "leetcode", "kaggle", "behance", "dribbble", "youtube", "email", "phone",
+}
 
 _SECTION_HEADS = {
     "summary": {"summary", "profile", "objective", "about"},
@@ -73,6 +82,35 @@ _MIN_GUTTER = 0.04
 _MIN_COLUMN_WORDS = 4
 
 
+def _both_sides_run_down_the_page(words, x: float) -> bool:
+    """True only when both sides of `x` have text on most of the same rows.
+
+    Word counts alone are not enough, and the false positive is the common
+    case rather than an exotic one. Almost every professional resume flushes
+    its dates to the right margin; add a two-column skills grid and the right
+    side easily clears a word-count threshold, so a perfectly ordinary
+    single-column page was detected as two-column and then cropped and
+    re-read -- which scrambled it. Measured on our own "executive" template:
+    plain extraction was flawless, and the gutter "detection" was what broke
+    it, splicing the contact line into the middle of the skills list.
+
+    A real magazine split has both columns running the length of the page.
+    A right-aligned date touches three or four rows out of twenty.
+    """
+    rows: dict[int, list[bool]] = {}
+    for w in words:
+        band = int(float(w["top"]) // 6)  # ~one text line
+        side = rows.setdefault(band, [False, False])
+        if float(w["x1"]) <= x:
+            side[0] = True
+        elif float(w["x0"]) >= x:
+            side[1] = True
+    if len(rows) < 6:
+        return False
+    both = sum(1 for left, right in rows.values() if left and right)
+    return both >= len(rows) * 0.5
+
+
 def _column_split_x(page) -> float | None:
     """Find the x of a two-column gutter, or None for a single-column page.
 
@@ -95,7 +133,8 @@ def _column_split_x(page) -> float | None:
         left = sum(1 for a, b in spans if b <= x)
         right = sum(1 for a, b in spans if a >= x)
         if left >= _MIN_COLUMN_WORDS and right >= _MIN_COLUMN_WORDS:
-            clear.append(x)
+            if _both_sides_run_down_the_page(words, x):
+                clear.append(x)
     if not clear:
         return None
 
@@ -114,6 +153,77 @@ def _column_split_x(page) -> float | None:
     if (best_run[-1] - best_run[0]) < width * _MIN_GUTTER:
         return None
     return (best_run[0] + best_run[-1]) / 2.0
+
+
+def _normalise_link(url: str) -> str:
+    return url.strip().rstrip("/")
+
+
+def extract_links(filename: str, content: bytes) -> dict[str, object]:
+    """Profile URLs from a PDF's annotation layer.
+
+    `extract_text` keeps the text layer and discards the annotations, but a
+    well-made resume puts the word "LinkedIn" over a link and the URL exists
+    *only* in the annotation. `_LINK_RE` scans visible text, finds nothing,
+    and `contact.links.missing` then docks the user two points for profile
+    links that are sitting in the file they uploaded.
+
+    Only allowlisted hosts are returned. Some templates hyperlink every
+    project title, and those belong to the project, not the contact header.
+
+    `mailto:`/`tel:` are reported separately so the caller can backfill a
+    contact field the regex missed -- they are never links.
+    """
+    found: list[str] = []
+    email = ""
+    phone = ""
+    if not filename.lower().endswith(".pdf"):
+        return {"links": [], "email": "", "phone": ""}
+    try:
+        import pdfplumber
+
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            for page in pdf.pages:
+                for link in page.hyperlinks or []:
+                    uri = (link.get("uri") or "").strip()
+                    if not uri:
+                        continue
+                    low = uri.lower()
+                    if low.startswith("mailto:"):
+                        email = email or uri[7:].split("?", 1)[0]
+                    elif low.startswith("tel:"):
+                        phone = phone or uri[4:]
+                    elif low.startswith(("http://", "https://")) and _known_host(uri):
+                        found.append(_normalise_link(uri))
+    except Exception:  # noqa: BLE001 — links are a bonus, never a parse failure
+        return {"links": [], "email": "", "phone": ""}
+
+    seen: dict[str, str] = {}
+    for url in found:
+        seen.setdefault(url.lower(), url)
+    return {"links": list(seen.values())[:6], "email": email, "phone": phone}
+
+
+def merge_extracted_links(data: dict, extracted: dict) -> dict:
+    """Fold harvested annotations into already-structured contact data.
+
+    Anything the text layer found wins on order; annotations only add. Keeps
+    `structure_text` a pure text->dict function, which twenty tests rely on.
+    """
+    contact = data.setdefault("contact", {})
+    existing = [x for x in contact.get("links", []) if x]
+    merged = list(existing)
+    seen = {_normalise_link(x).lower() for x in existing}
+    for url in extracted.get("links", []):
+        if url.lower() not in seen:
+            seen.add(url.lower())
+            merged.append(url)
+    contact["links"] = merged[:6]
+    if not contact.get("email") and extracted.get("email"):
+        contact["email"] = extracted["email"]
+    if not contact.get("phone") and extracted.get("phone"):
+        contact["phone"] = extracted["phone"]
+    return data
 
 
 def _extract_pdf(content: bytes) -> str:
@@ -183,15 +293,42 @@ def extract_text(filename: str, content: bytes) -> str:
 # three: "Jan 2020 - Present", a purely numeric "2020-2024", and a lone
 # trailing year. The original pattern only had the first, so a header written
 # "Acme Corp - Engineer - 2020-2024" kept the dates glued to the role.
+#: Only real month names may introduce a year. The first branch used to be
+#: ``[A-Za-z]{3,9}\.?\s?\d{4}``, which treats ANY three-to-nine letter word
+#: before a year as a month: "CDAC, Pune 2024" parsed its dates as
+#: "Pune 2024", and the editor then had to apologise for a date it could not
+#: read. A city is not a month.
+_MONTH_RE = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
 _DATE_TAIL_RE = re.compile(
     r"("
-    r"[A-Za-z]{3,9}\.?\s?\d{4}.*"
+    rf"{_MONTH_RE}\s?\d{{4}}.*"
     r"|(?:19|20)\d{2}\s*[-\u2013\u2014]\s*(?:(?:19|20)\d{2}|present|current).*"
     r"|(?:19|20)\d{2}\s*"
     r")$",
     re.IGNORECASE,
 )
 _HEADER_SEP_RE = re.compile(r"\s+[-\u2013\u2014|]\s+")
+#: "Score: 73%", "CGPA: 7.79" -- a property of the entry above, not an entry.
+_GRADE_RE = re.compile(
+    r"^(score|cgpa|gpa|percentage|percent|marks|grade|aggregate|result)\b"
+    r"\s*[:\-\u2013]?\s*(.+)$",
+    re.IGNORECASE,
+)
+
+
+def _grade_value(kind: str, value: str) -> str:
+    """Keep the measure only when the number cannot speak for itself.
+
+    "Score: 73%" -> "73%"   -- the unit already says what it is
+    "CGPA: 7.79" -> "CGPA 7.79" -- a bare 7.79 on a resume is meaningless
+
+    Dropping the label outright was the first attempt, and it turned a grade
+    into an unlabelled decimal in every export.
+    """
+    value = value.strip().rstrip(".,;")
+    if value.endswith("%"):
+        return value
+    return f"{kind.strip().upper() if len(kind) <= 4 else kind.strip().title()} {value}"
 
 
 def _split_date_tail(header: str) -> tuple[str, str]:
@@ -216,6 +353,59 @@ def _is_only_dates(line: str) -> bool:
     return bool(dates) and not remainder
 
 
+_COMPANY_RE = re.compile(
+    r"\b(ltd|inc|llc|llp|pvt|corp|corporation|technologies|technology|tech"
+    r"|solutions|systems|labs|software|consulting|services|gmbh|plc|company"
+    r"|group|industries|enterprises|holdings)\b",
+    re.IGNORECASE,
+)
+_ROLE_RE = re.compile(
+    r"\b(engineer|developer|programmer|manager|analyst|intern|designer"
+    r"|consultant|architect|lead|senior|junior|principal|staff|specialist"
+    r"|scientist|administrator|officer|director|associate|executive|head"
+    r"|trainee|apprentice)\b",
+    re.IGNORECASE,
+)
+_INSTITUTION_RE = re.compile(
+    r"\b(university|institute|college|school|academy|polytechnic|cdac|iit"
+    r"|nit|vit|iiit|bits|campus|faculty)\b",
+    re.IGNORECASE,
+)
+_QUALIFICATION_RE = re.compile(
+    r"(\bb\.?\s?e\b|\bb\.?\s?tech\b|\bm\.?\s?tech\b|\bb\.?\s?sc\b"
+    r"|\bm\.?\s?sc\b|\bbca\b|\bmca\b|\bmba\b|\bdiploma\b|\bbachelor"
+    r"|\bmaster|\bph\.?d\b|\bpg-?dac\b|\bxii\b|\bhsc\b|\bssc\b"
+    r"|\bpost graduate\b|\bgraduate\b|\bcertificate\b)",
+    re.IGNORECASE,
+)
+
+
+def _order_pair(
+    left: str, right: str, first_re: re.Pattern, second_re: re.Pattern
+) -> tuple[str, str]:
+    """Order a two-sided header by evidence instead of by position.
+
+    Headers are written both ways round and both are common:
+
+        Acme Corp | Senior Engineer          -> company first
+        Software Engineer | Ceinsys Tech Ltd -> role first
+
+    Reading position alone put "Software Engineer" in the Company box. Each
+    side is scored for how much it looks like the FIRST field minus how much
+    it looks like the second; the stronger claim wins.
+
+    **A tie keeps the given order**, so every resume that parses correctly
+    today continues to -- this may only ever correct an unambiguous case.
+    """
+    if not right:
+        return left, right
+
+    def lean(text: str) -> int:
+        return len(first_re.findall(text)) - len(second_re.findall(text))
+
+    return (right, left) if lean(right) > lean(left) else (left, right)
+
+
 def _is_bullet_continuation(line: str, entry: dict | None) -> bool:
     """True for a wrapped bullet that lost its glyph.
 
@@ -238,7 +428,24 @@ def _is_bullet_continuation(line: str, entry: dict | None) -> bool:
     if stripped[0].islower():
         return True
     indented = line[:1] in (" ", "\t")
-    return indented and not _HEADER_SEP_RE.search(stripped)
+    if indented and not _HEADER_SEP_RE.search(stripped):
+        return True
+
+    # The capital-letter rule above is not enough. A wrapped bullet very often
+    # resumes on a proper noun -- "Java/Spring Boot and Python/FastAPI
+    # services, ..." -- and was then read as a new employer, truncating the
+    # real bullet and inventing a company from the next fragment.
+    #
+    # The reliable signal is not how the candidate starts but whether the
+    # PREVIOUS line finished. "... integrations across" plainly did not.
+    previous = entry["bullets"][-1].rstrip()
+    if previous and previous[-1] not in ".!?:;":
+        looks_like_header = _DATE_TAIL_RE.search(stripped) or _HEADER_SEP_RE.search(stripped)
+        # Headers are short; prose that wrapped is not. Five words is
+        # deliberately conservative: a false merge destroys a real entry.
+        if not looks_like_header and len(stripped.split()) >= 5:
+            return True
+    return False
 
 
 
@@ -354,6 +561,35 @@ def structure_text(raw: str) -> dict:
         data["contact"]["phone"] = phone.group(0).strip()
     data["contact"]["links"] = list(dict.fromkeys(_LINK_RE.findall(raw)))[:4]
 
+    # `contact.location` had no extraction at all -- not a weak one, none --
+    # so `contact.location.missing` fired on every resume ever uploaded and
+    # told people to add a city that was already in the header.
+    #
+    # The contact line is a run of fields separated by bullets, pipes or
+    # slashes. Rather than guess at what a place name looks like, take the
+    # field that is NOT one of the things we can positively identify: not the
+    # email, not the phone, not a link, not the name, and short enough to be
+    # a place rather than a sentence.
+    for line in non_empty[:4]:
+        if _classify(line):
+            break
+        if not (_EMAIL_RE.search(line) or _PHONE_RE.search(line)):
+            continue
+        for field in _CONTACT_SEP_RE.split(line):
+            field = field.strip(" \t•|,")
+            if not field or len(field) > 40 or len(field.split()) > 4:
+                continue
+            if _EMAIL_RE.search(field) or _PHONE_RE.search(field):
+                continue
+            if _LINK_RE.search(field) or field.lower() in _LINK_WORDS:
+                continue
+            if field == data["contact"].get("name") or any(c.isdigit() for c in field):
+                continue
+            data["contact"]["location"] = field
+            break
+        if data["contact"].get("location"):
+            break
+
     buckets: dict[str, list[str]] = {
         k: [] for k in _SECTION_HEADS if k not in _EXTRA_KINDS
     }
@@ -367,6 +603,20 @@ def structure_text(raw: str) -> dict:
 
     for line in lines:
         section = _classify(line)
+        # A skills GROUP LABEL is not a section heading. "Languages" is the
+        # most common label on a technical resume ("Languages: Python, Go")
+        # and it collides head-on with the Languages extras section, so the
+        # whole skills block was being hijacked into an extras section and
+        # `skills` came back empty. Inside skills, demand the evidence a real
+        # heading carries -- ALL-CAPS, or a trailing colon with nothing after
+        # it -- before believing a new section has started.
+        if (
+            section in _EXTRA_KINDS
+            and current == "skills"
+            and line.strip() == line.strip().title()
+            and not line.strip().endswith(":")
+        ):
+            section = None
         if section:
             seen_known_heading = True
             if section in _EXTRA_KINDS:
@@ -435,9 +685,15 @@ def structure_text(raw: str) -> dict:
                 continue
             header, dates = _split_date_tail(header)
             parts = _HEADER_SEP_RE.split(header, maxsplit=1)
+            company, role = _order_pair(
+                parts[0].strip(),
+                parts[1].strip() if len(parts) > 1 else "",
+                _COMPANY_RE,
+                _ROLE_RE,
+            )
             entry = {
-                "company": parts[0].strip(),
-                "role": parts[1].strip() if len(parts) > 1 else "",
+                "company": company,
+                "role": role,
                 "dates": dates,
                 "bullets": [],
             }
@@ -449,18 +705,59 @@ def structure_text(raw: str) -> dict:
                 e.pop("role", None)
         data[key] = entries
 
+    # Education used to be ten lines with no entry model: every non-empty line
+    # became a record, and the three fields were filled positionally. A resume
+    # reading
+    #
+    #     Post Graduate Diploma in Advanced Computing (PG-DAC) — CDAC, Pune 2024 | Pune
+    #     Score: 73%
+    #
+    # produced TWO entries, the second a school called "Score: 73%", with the
+    # qualification in the School box and the city in the dates. Those rows
+    # reach the export, so a resume sent to an employer listed a score as a
+    # school.
+    edu_entry: dict | None = None
     for line in buckets["education"]:
         text = line.strip()
         if not text:
             continue
-        parts = re.split(r"\s+[-–—|]\s+", text)
-        data["education"].append(
-            {
-                "school": parts[0].strip(),
-                "degree": parts[1].strip() if len(parts) > 1 else "",
-                "dates": parts[2].strip() if len(parts) > 2 else "",
-            }
+
+        # A grade belongs to the entry above it, never to one of its own.
+        grade = _GRADE_RE.match(text)
+        if grade and edu_entry is not None:
+            edu_entry["grade"] = _grade_value(grade.group(1), grade.group(2))
+            continue
+
+        pieces: list[str] = []
+        dates = ""
+        for piece in _HEADER_SEP_RE.split(text):
+            piece = piece.strip()
+            if not piece:
+                continue
+            head, found = _split_date_tail(piece)
+            if found and not dates:
+                dates = found
+            pieces.append(head.strip() or piece)
+
+        if not pieces:
+            continue
+
+        school, degree = _order_pair(
+            pieces[0],
+            pieces[1] if len(pieces) > 1 else "",
+            _INSTITUTION_RE,
+            _QUALIFICATION_RE,
         )
+        # Anything after the first two parts is a place, not a date -- the
+        # dates have already been lifted out of every piece above.
+        edu_entry = {
+            "school": school,
+            "degree": degree,
+            "dates": dates,
+            "location": " ".join(pieces[2:]).strip(),
+            "grade": "",
+        }
+        data["education"].append(edu_entry)
 
     for line in buckets["skills"]:
         text = line.strip().lstrip("-•* ")
@@ -546,7 +843,9 @@ class ParsingService:
             resume.parse_status = "failed"
             resume.parse_note = note
         else:
-            resume.structured_data = structure_text(raw)
+            resume.structured_data = merge_extracted_links(
+                structure_text(raw), extract_links(filename, content)
+            )
             resume.parse_status = "ready"
             resume.parse_note = ""
         self.resumes.db.commit()
@@ -576,7 +875,9 @@ class ParsingService:
                 resume.parse_status = "failed"
                 resume.parse_note = note
             else:
-                resume.structured_data = structure_text(raw)
+                resume.structured_data = merge_extracted_links(
+                    structure_text(raw), extract_links(filename, content)
+                )
                 resume.parse_status = "ready"
                 resume.parse_note = ""
         except Exception as exc:  # noqa: BLE001 — surfaced via parse_status

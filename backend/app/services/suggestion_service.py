@@ -15,6 +15,7 @@ from app.services.exceptions import (
     StaleSuggestion,
     SuggestionNotFound,
     ValidationError,
+    WriterUnavailable,
 )
 from app.services.heuristics import match_keywords
 from app.services.version_service import VersionService
@@ -136,22 +137,46 @@ class SuggestionService:
         draft["target_ref"] = target_ref
 
         if not (draft.get("suggested_text") or "").strip():
-            raise RewriteRejected("Could not draft a rewrite for this section.")
+            raise RewriteRejected(
+                "Could not draft a rewrite for this section.",
+                reason="nothing_to_rewrite",
+            )
         if draft["suggested_text"].strip() == draft["original_text"].strip():
-            # Most often the AI writer is unavailable and the deterministic
-            # fallback has no mechanical fix for this finding -- it cannot
-            # invent a metric, and should not pretend otherwise.
+            # A no-op has two completely different causes and they must not
+            # share a message.
+            #
+            #   degraded  the writer LLM was never reached (rate limit, timeout,
+            #             outage) and the deterministic fallback had no
+            #             mechanical fix. Nothing has been learned about the
+            #             user's resume. Transient, upstream, worth retrying.
+            #
+            #   ran       the writer answered and genuinely could not improve
+            #             the text -- most often because the fix requires a
+            #             number only the user knows.
+            #
+            # Conflating them produced the original defect: a throttled request
+            # was reported as a confident verdict about someone's resume.
+            if outcome.status == "degraded":
+                raise WriterUnavailable(
+                    "The AI writer could not be reached just now, so this "
+                    "rewrite was not attempted. Nothing is wrong with your "
+                    "resume - try again in a minute."
+                )
             raise RewriteRejected(
                 "This one needs a fact only you have - the AI writer cannot "
                 "add a number that is not already in your resume. Edit the "
-                "text directly instead."
+                "text directly instead.",
+                reason="needs_your_fact",
             )
 
         # The same grounding guard the tailoring graph uses. An ungrounded
         # draft is never persisted, so the user never sees it.
         verdict = agents.review_draft(draft, data).value
         if not verdict.approved:
-            raise RewriteRejected(f"The reviewer rejected this rewrite: {verdict.notes}")
+            raise RewriteRejected(
+                f"The reviewer rejected this rewrite: {verdict.notes}",
+                reason="critic_rejected",
+            )
 
         suggestion = self.suggestions.create(
             resume_id=resume.id,

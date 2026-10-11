@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass, field
 
+from app.services import ats
 from app.services.resume_ops import date_label, to_plain_text
 from app.services.text_match import canonical_aliases, contains, count_hits
 
@@ -31,27 +32,61 @@ WEIGHTS = {"contact": 15, "summary": 20, "experience": 45, "format": 20}
 BULLET_COACHED_MAX = 30
 BULLET_HARD_CAP = 45
 
-ACTION_VERBS = {
+# Past-tense and simple forms. A bullet is scored on its FIRST word, so this
+# is the set that matters there.
+_ACTION_VERBS_PAST = {
     # Leadership / ownership
     "led", "owned", "drove", "directed", "headed", "spearheaded", "championed",
     "coordinated", "oversaw", "managed", "mentored", "coached", "guided",
     # Building / creating
-    "built", "created", "designed", "developed", "engineered", "architected",
-    "implemented", "launched", "shipped", "delivered", "deployed", "established",
-    "founded", "introduced", "produced", "authored", "prototyped",
+    "built", "rebuilt", "created", "designed", "developed", "engineered",
+    "architected", "implemented", "launched", "shipped", "delivered",
+    "deployed", "established", "founded", "introduced", "produced",
+    "authored", "wrote", "prototyped",
     # Improving / changing
-    "improved", "optimised", "optimized", "reduced", "increased", "accelerated",
-    "streamlined", "automated", "scaled", "migrated", "modernised", "modernized",
-    "refactored", "restructured", "transformed", "consolidated", "eliminated",
-    "resolved", "fixed", "hardened", "simplified", "standardised", "standardized",
-    "upgraded", "rearchitected", "orchestrated",
-    # Analysis / research
-    "analysed", "analyzed", "researched", "investigated", "diagnosed",
-    "identified", "evaluated", "measured", "forecast", "modelled", "modeled",
-    # Business / cross-functional
+    "improved", "optimised", "optimized", "refactored", "modernised",
+    "modernized", "streamlined", "simplified", "consolidated", "standardised",
+    "standardized", "restructured", "rearchitected", "migrated", "upgraded",
+    "orchestrated",
+    "automated", "hardened", "secured", "transformed", "tuned", "ported",
+    # Results
+    "reduced", "cut", "eliminated", "saved", "accelerated", "scaled", "grew",
+    "expanded", "increased", "generated", "recovered", "fixed", "resolved",
+    # Analysis / collaboration
+    "analysed", "analyzed", "measured", "evaluated", "forecast", "modeled",
+    "modelled", "researched", "investigated", "diagnosed", "identified",
     "negotiated", "partnered", "collaborated", "presented", "influenced",
-    "secured", "generated", "grew", "expanded", "recovered", "saved",
+    "ran", "trained",
 }
+
+# Present participles. The list used to be past-tense only, so a summary
+# reading "Platform engineer with 6 years BUILDING distributed systems" scored
+# no action verb and raised summary.no_action_verb -- a finding the user could
+# not act on, and one the live writer kept tripping while fixing something
+# else. These are not derivable: led->leading, built->building, ran->running,
+# cut->cutting are all irregular, so they are listed.
+_ACTION_VERBS_PARTICIPLE = {
+    "leading", "owning", "driving", "directing", "heading", "spearheading",
+    "coordinating", "overseeing", "managing", "mentoring", "coaching",
+    "guiding", "building", "rebuilding", "creating", "designing",
+    "developing", "engineering", "architecting", "implementing", "launching",
+    "shipping", "delivering", "deploying", "establishing", "founding",
+    "introducing", "producing", "authoring", "writing", "prototyping",
+    "improving", "optimising", "optimizing", "refactoring", "modernising",
+    "modernizing", "streamlining", "simplifying", "consolidating",
+    "standardising", "standardizing", "restructuring", "rearchitecting",
+    "orchestrating",
+    "migrating", "upgrading", "automating", "hardening", "securing",
+    "transforming", "tuning", "porting", "reducing", "cutting", "eliminating",
+    "saving", "accelerating", "scaling", "growing", "expanding", "increasing",
+    "generating", "recovering", "fixing", "resolving", "analysing",
+    "analyzing", "measuring", "evaluating", "forecasting", "modeling",
+    "modelling", "researching", "investigating", "diagnosing", "identifying",
+    "negotiating", "partnering", "collaborating", "presenting", "influencing",
+    "running", "training",
+}
+
+ACTION_VERBS = _ACTION_VERBS_PAST | _ACTION_VERBS_PARTICIPLE
 
 # A number only counts as quantification when something is actually being
 # measured. The old pattern included a bare `\b\d{2,}\b`, so "shipped it in
@@ -192,7 +227,12 @@ def _score_summary(data: dict) -> tuple[int, list[Finding]]:
             severity=_sev(6), points=6,
             message="Summary has no quantified achievement",
             fix_hint="Add a real number — team size, users served, latency cut.",
-            action="rewrite",
+            # No AI action, deliberately. The writer corpus marks this exact
+            # finding must-decline and every report scores the refusal as a
+            # success: inventing a metric that is not in the resume is
+            # fabrication. Advertising "Improve with AI" here promised a fix
+            # the system is built never to give, and spent two server-side
+            # model calls to answer 422. The number has to come from the user.
         ))
 
     # Whole-word, not substring: "Fulfilled orders" used to earn action-verb
@@ -259,7 +299,7 @@ def _score_experience(data: dict) -> tuple[int, list[Finding]]:
             points=18 - metric_award,
             message=f"Only {with_metrics} of {len(bullets)} bullets are quantified",
             fix_hint="Add the number you moved: %, time saved, revenue, scale.",
-            action="rewrite",
+            # Also no AI action -- same reason as summary.no_metric above.
             meta={"quantified": with_metrics, "total": len(bullets)},
         ))
 
@@ -321,30 +361,33 @@ def _score_format(data: dict) -> tuple[int, list[Finding]]:
     findings: list[Finding] = []
     points = 0
 
+    # The 20-point format budget is now 4 + 3 + 5 + 4 + 4, the last four
+    # going to ATS parse-safety. WEIGHTS["format"] is unchanged, so the
+    # overall score is still out of 100 and `Δscore == points` still holds.
     if data.get("skills"):
-        points += 5
+        points += 4
     else:
         findings.append(Finding(
             id="format.no_skills", category="format", target_ref="skills",
-            severity=_sev(5), points=5, message="No skills section",
+            severity=_sev(4), points=4, message="No skills section",
             fix_hint="ATS keyword matching leans heavily on this section.",
         ))
 
     if data.get("education"):
-        points += 4
+        points += 3
     else:
         findings.append(Finding(
             id="format.no_education", category="format", target_ref="education",
-            severity=_sev(4), points=4, message="No education section",
+            severity=_sev(3), points=3, message="No education section",
             fix_hint="Add your highest qualification, even if it is older.",
         ))
 
     text = to_plain_text(data)
     words = len(text.split())
     if 250 <= words <= 900:
-        points += 6
+        points += 5
     elif words < 250:
-        points += 2
+        points += 1
         findings.append(Finding(
             id="format.too_thin", category="format", target_ref="experience",
             severity=_sev(4), points=4,
@@ -353,7 +396,7 @@ def _score_format(data: dict) -> tuple[int, list[Finding]]:
             meta={"words": words},
         ))
     else:
-        points += 3
+        points += 2
         findings.append(Finding(
             id="format.too_long", category="format", target_ref="experience",
             severity=_sev(3), points=3,
@@ -378,9 +421,66 @@ def _score_format(data: dict) -> tuple[int, list[Finding]]:
                 action="rewrite", meta={"refs": overlong},
             ))
         else:
-            points += 5
+            points += 4
 
+    points += _score_ats(data, findings)
     return min(points, WEIGHTS["format"]), findings
+
+
+def _score_ats(data: dict, findings: list[Finding]) -> int:
+    """Parse-safety: will an enterprise ATS read this correctly? Worth 4.
+
+    Scored inside `format` rather than as a new top-level category so the
+    overall score stays out of 100 and every existing `Δscore == points`
+    assertion keeps holding.
+
+    Only CONTENT-level checks live here. Layout problems -- multi-column
+    scramble, header-band text, tables -- are properties of the template, not
+    the data, so they are fixed in the exporter and guarded by a round-trip
+    test instead of being nagged about on every analysis.
+    """
+    points = 0
+
+    bad_dates = ats.unparseable_dates(data)
+    if bad_dates:
+        findings.append(Finding(
+            id="ats.unparseable_dates", category="format",
+            target_ref=bad_dates[0], severity=_sev(2), points=2,
+            message=f"{len(bad_dates)} date(s) an ATS may not read",
+            fix_hint="Use 'Jan 2024 – Mar 2026'. Workday and Taleo infer the "
+                     "pattern from your first date, so one odd entry can "
+                     "corrupt the whole timeline.",
+            meta={"refs": bad_dates},
+        ))
+    else:
+        points += 2
+
+    glyphs = ats.decorative_glyphs(data)
+    if glyphs:
+        findings.append(Finding(
+            id="ats.decorative_glyphs", category="format",
+            target_ref="experience", severity=_sev(1), points=1,
+            message=f"Decorative characters: {' '.join(glyphs[:5])}",
+            fix_hint="Arrows, stars and emoji tokenise as unknown characters. "
+                     "Older parsers can treat them as section breaks and drop "
+                     "the bullet. Plain text and standard bullets only.",
+            meta={"glyphs": glyphs},
+        ))
+    else:
+        points += 1
+
+    if ats.out_of_order_experience(data):
+        findings.append(Finding(
+            id="ats.not_reverse_chronological", category="format",
+            target_ref="experience", severity=_sev(1), points=1,
+            message="Experience is not newest-first",
+            fix_hint="Most parsers take your current employer to be the first "
+                     "entry. Order roles newest first.",
+        ))
+    else:
+        points += 1
+
+    return points
 
 
 # ----------------------------------------------------------------- steps ---

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 from app.ai import llm, prompts
 from app.ai.schemas import (
+    AtsReview,
     ChatReply,
     CriticBatch,
     CriticVerdict,
@@ -24,8 +25,13 @@ from app.ai.schemas import (
     WriterOutput,
 )
 from app.ai.vectorstore import VectorStore
+from app.services import ats as ats_rules
 from app.services import resume_ops
-from app.services.heuristics import extract_keywords
+from app.services.heuristics import (
+    BULLET_COACHED_MAX,
+    extract_keywords,
+    score_resume,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,8 +182,15 @@ def write_suggestions(
     resume_id: uuid.UUID | None = None,
     store: VectorStore | None = None,
     limit: int = MAX_SUGGESTIONS,
+    rejections: list[dict] | None = None,
 ) -> AgentOutcome:
-    """Draft rewrites. Retrieval is scoped to this user's own bullets."""
+    """Draft rewrites. Retrieval is scoped to this user's own bullets.
+
+    `rejections` carries the critic's notes from the previous round. Until
+    now a revision round re-asked the identical question at the same
+    temperature and hoped for a different answer, which is why retrying was
+    restricted to the case where every single draft had been rejected.
+    """
     bullets = list(resume_ops.iter_bullets(structured_data))
     if not bullets or not gap_keywords:
         return AgentOutcome(value=[], agent="writer", notes=["nothing to do"])
@@ -207,6 +220,18 @@ def write_suggestions(
                 f"Rewrite at most {limit}. Use the exact target_ref and copy "
                 f"original_text verbatim."
             )
+            if rejections:
+                detail = "\n".join(
+                    f"- {r.get('target_ref', '?')}: {r.get('critic_notes') or 'rejected'}"
+                    for r in rejections[:6]
+                )
+                payload += (
+                    "\n\nThese drafts were REJECTED in the previous round. "
+                    "Do not repeat them:\n"
+                    f"{detail}\n"
+                    "Keep every figure and unit that the original text "
+                    "already contained, and invent none."
+                )
             parsed, call = llm.structured(
                 task="writing",
                 system=prompts.WRITER.format(context=context),
@@ -310,6 +335,131 @@ def _rule_drafts(bullets, gaps: list[str], limit: int) -> list[dict]:
 
 
 # -------------------------------------------------------------- critic agent
+# Numbers a reader takes as a quantitative CLAIM: "58", "22", "9", "3.5".
+# The lookbehind excludes digits glued to the end of a word -- "S3", "EC2",
+# "v2", "OAuth2" are names, not measurements, and flagging them as fabricated
+# metrics would be noise. A digit followed by letters stays in scope, because
+# "3x faster" and "5k users" are very much claims.
+_CLAIM_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9.])\d+(?:\.\d+)?")
+
+# What counts as already-present in the resume. Slightly more permissive than
+# the claim pattern, but not blindly so: a MULTI-digit run inside a token is
+# usually a real figure ("FY2019"), whereas a single digit inside a token is
+# almost always part of a name. Letting "S3" license the claim "3x faster"
+# would have made the guard useless for small numbers, which is precisely
+# where fabrication is easiest.
+_ANY_NUMBER_RE = re.compile(r"\d{2,}(?:\.\d+)?")
+
+
+def unverifiable_numbers(resume_text: str, suggested: str) -> set[str]:
+    """Numbers in `suggested` that appear nowhere in the resume.
+
+    Compared against the WHOLE resume rather than the one string being
+    rewritten, which is the difference between a guard that works and one that
+    breaks the compose path. Writing a summary from an empty string must be
+    allowed to surface "22 minutes to 9 minutes" from a bullet below it --
+    those are the candidate's own facts. Only a number with no source anywhere
+    in the document is a fabrication.
+
+    Digits only, on purpose. A number is either present in the source text or
+    it is not, so this has no judgement calls and no false positives. Semantic
+    fabrication -- "contributed to" becoming "Led" -- is the LLM critic's job
+    and no regex will ever catch it.
+    """
+    known = set(_CLAIM_NUMBER_RE.findall(resume_text))
+    known |= set(_ANY_NUMBER_RE.findall(resume_text))
+    # Normalise 9 and 9.0 to the same fact so formatting is not a fabrication.
+    known |= {n.rstrip("0").rstrip(".") for n in known if "." in n}
+    found = set(_CLAIM_NUMBER_RE.findall(suggested))
+    return {
+        n for n in found
+        if n not in known and (n.rstrip("0").rstrip(".") if "." in n else n) not in known
+    }
+
+
+def _self_check(draft: dict, structured_data: dict) -> str | None:
+    """Why this draft would be rejected, phrased for the writer to act on.
+
+    Deliberately the same two deterministic rules the critic's hard checks
+    apply, so the retry prompt cannot drift away from what is actually
+    enforced downstream.
+    """
+    invented = unverifiable_numbers(
+        resume_ops.to_plain_text(structured_data),
+        draft.get("suggested_text", ""),
+    )
+    if invented:
+        return (
+            "it states "
+            + ", ".join(str(n) for n in invented)
+            + ", which appears nowhere in the resume. Use only figures the "
+            "resume already contains, or none at all"
+        )
+
+    regressions = introduced_findings(
+        structured_data, draft.get("target_ref", ""),
+        draft.get("suggested_text", ""),
+    )
+    if regressions:
+        return (
+            "it fixes the stated problem but introduces "
+            + ", ".join(regressions)
+            + " -- most often by dropping a number, a unit or a strong verb "
+            "that the original text carried"
+        )
+    return None
+
+
+def introduced_findings(
+    structured_data: dict, target_ref: str, suggested: str
+) -> list[str]:
+    """Findings this rewrite would CREATE that the resume does not have yet.
+
+    Fixing one problem by causing another is not a fix. The writer corpus has
+    measured this as its `clean` column from the beginning -- and production
+    never enforced it, so the corpus held the writer to a standard the
+    application did not.
+
+    Measured, reproducibly, across two consecutive live runs: asked to shorten
+    an overlong padded bullet, the writer removed the clause that carried the
+    metric, clearing format.overlong_bullets and raising
+    experience.unquantified_bullets in the same edit.
+
+    Deterministic and local -- it is the same scorer the UI shows -- so it
+    costs no tokens and works on the rule path and the model path alike. The
+    earlier fix for this only touched _rule_rewrite, which the live writer
+    never calls.
+    """
+    if not suggested.strip():
+        return []
+    try:
+        composing = not resume_ops.resolve(structured_data, target_ref).strip()
+        before_findings = score_resume(structured_data)["findings"]
+        before = {f["id"] for f in before_findings}
+        patched = resume_ops.apply_patch(structured_data, target_ref, suggested)
+        after_findings = score_resume(patched)["findings"]
+    except Exception:  # noqa: BLE001 - a guard must never be the thing that breaks
+        logger.warning("introduced_findings could not score %s", target_ref)
+        return []
+
+    new_ids = [f for f in after_findings if f["id"] not in before]
+
+    if composing:
+        # A section that did not exist cannot regress. summary.missing
+        # SUPPRESSES the other summary rules, so composing any summary at all
+        # unmasks summary.too_short, summary.no_metric and
+        # summary.no_action_verb -- by construction, not because the writer
+        # did anything wrong.
+        #
+        # And summary.no_metric can only be cleared by a number, which the
+        # writer is forbidden to invent. Counting these would make the compose
+        # path impossible to satisfy: every draft rejected, /rewrite
+        # permanently 422. Findings at OTHER refs still count.
+        new_ids = [f for f in new_ids if f.get("target_ref") != target_ref]
+
+    return sorted(f["id"] for f in new_ids)
+
+
 def _hard_check(draft: dict, structured_data: dict) -> AgentOutcome | None:
     """Non-negotiable checks that run with or without a key.
 
@@ -338,10 +488,58 @@ def _hard_check(draft: dict, structured_data: dict) -> AgentOutcome | None:
             agent="critic",
             notes=["hard check: original_text mismatch"],
         )
+
+    # A number with no source anywhere in the resume is a fabricated metric.
+    #
+    # This runs here, in the checks that happen "with or without a key",
+    # because until now the ONLY thing between an invented figure and the
+    # user's resume was a single LLM call. Measured: on the compose path the
+    # writer produced "58" for a resume whose nearest real figure is a 59.1%
+    # reduction. The LLM critic did reject it -- but that is a probabilistic
+    # guard on this project's most important safety property, and it costs
+    # nothing to put a deterministic one in front of it.
+    regressions = introduced_findings(
+        structured_data,
+        draft.get("target_ref", ""),
+        draft.get("suggested_text", ""),
+    )
+    if regressions:
+        return AgentOutcome(
+            value=CriticVerdict(
+                approved=False,
+                notes=(
+                    "the rewrite introduces "
+                    + ", ".join(regressions)
+                    + ", which the resume did not have before"
+                ),
+                severity="regression",
+            ),
+            agent="critic",
+            notes=[f"hard check: introduces {', '.join(regressions)}"],
+        )
+
+    invented = unverifiable_numbers(
+        resume_ops.to_plain_text(structured_data), draft.get("suggested_text", "")
+    )
+    if invented:
+        return AgentOutcome(
+            value=CriticVerdict(
+                approved=False,
+                notes=(
+                    "introduces number(s) that appear nowhere in the resume: "
+                    + ", ".join(sorted(invented))
+                ),
+                severity="fabrication",
+            ),
+            agent="critic",
+            notes=["hard check: unverifiable number"],
+        )
     return None
 
 
-def _batch_payload(pending: list[tuple[int, str, dict]]) -> str:
+def _batch_payload(
+    pending: list[tuple[int, str, dict]], structured_data: dict | None = None
+) -> str:
     """One numbered block per draft.
 
     The originals are labelled and fenced rather than trailing off the end of
@@ -358,11 +556,34 @@ def _batch_payload(pending: list[tuple[int, str, dict]]) -> str:
             f"PROPOSED: {draft.get('suggested_text', '')}\n"
             f"KEYWORDS THE WRITER CLAIMS TO HAVE ADDED: {keywords}"
         )
+    # The resume itself, once, ahead of the drafts.
+    #
+    # Until now the critic was shown ONLY the single line being rewritten, and
+    # then asked whether the rewrite claimed anything "the original" did not
+    # support. For a composed summary the ORIGINAL is empty, so rejection was
+    # the only answer consistent with what it had been given -- the critic was
+    # not being strict, it was being asked an impossible question. Measured:
+    # summary rewrites rejected in run after run, and one live rejection read
+    # "Adds technology (Go) not present in original" for a resume that lists
+    # Go under skills.
+    #
+    # The deterministic half of the same safety system already compares
+    # against the whole resume (unverifiable_numbers uses to_plain_text), so
+    # the two halves disagreed about what the source even was.
+    resume_block = ""
+    if structured_data:
+        try:
+            full = resume_ops.to_plain_text(structured_data).strip()
+        except Exception:  # noqa: BLE001 - never let context-building fail a review
+            full = ""
+        if full:
+            resume_block = f"RESUME (reference -- for checking whether a fact is real):\n{full}\n\n"
+
     header = (
         f"Check {len(pending)} proposed rewrite(s). "
         f"Return one verdict per numbered item.\n\n"
     )
-    return header + "\n\n".join(blocks)
+    return resume_block + header + "\n\n".join(blocks)
 
 
 def review_batch(drafts: list[dict], structured_data: dict) -> list[AgentOutcome]:
@@ -400,7 +621,7 @@ def review_batch(drafts: list[dict], structured_data: dict) -> list[AgentOutcome
         parsed, call = llm.structured(
             task="critique",
             system=prompts.CRITIC,
-            user=_batch_payload(pending),
+            user=_batch_payload(pending, structured_data),
             schema=CriticBatch,
             temperature=0.0,
         )
@@ -550,31 +771,71 @@ def rewrite_for_finding(
                 if composing
                 else f"Current text:\n{original}"
             )
-            parsed, call = llm.structured(
-                task="writing",
-                system=system,
-                user=payload,
-                schema=RevisionDraft,
-                temperature=0.4,
-            )
-            text = (parsed.suggested_text or "").strip()
-            if text:
-                return AgentOutcome(
-                    value={
-                        "target_ref": target_ref,
-                        "original_text": original,
-                        "suggested_text": text,
-                        "keywords": [k for k in parsed.keywords if k][:8],
-                        "reasoning": (parsed.reasoning or "").strip(),
-                    },
-                    agent="writer",
-                    model=call.model,
-                    latency_ms=call.latency_ms,
-                    tokens_in=call.tokens_in,
-                    tokens_out=call.tokens_out,
-                    used_llm=True,
+
+            # Up to two attempts. The writer has never been told why a draft
+            # was thrown away: a rejected rewrite was simply discarded and the
+            # endpoint answered 422. Both deterministic rejections -- an
+            # invented number, and a rewrite that introduces a new finding --
+            # describe exactly what is wrong in a sentence the model can act
+            # on, so the second attempt is given that sentence rather than
+            # being asked the same question again.
+            attempt_payload = payload
+            last: tuple[dict, object] | None = None
+            for attempt in (1, 2):
+                parsed, call = llm.structured(
+                    task="writing",
+                    system=system,
+                    user=attempt_payload,
+                    schema=RevisionDraft,
+                    temperature=0.4,
                 )
-            logger.warning("rewrite_for_finding: model returned empty text")
+                text = (parsed.suggested_text or "").strip()
+                if not text:
+                    logger.warning("rewrite_for_finding: model returned empty text")
+                    break
+
+                value = {
+                    "target_ref": target_ref,
+                    "original_text": original,
+                    "suggested_text": text,
+                    "keywords": [k for k in parsed.keywords if k][:8],
+                    "reasoning": (parsed.reasoning or "").strip(),
+                }
+                last = (value, call)
+
+                complaint = _self_check(value, structured_data)
+                if complaint is None or attempt == 2:
+                    # Attempt 2 is returned even when it still fails: the
+                    # critic and the same hard checks run again downstream and
+                    # will reject it. Swallowing it here would turn a visible
+                    # rejection into a silent one.
+                    return AgentOutcome(
+                        value=value,
+                        agent="writer",
+                        model=call.model,
+                        latency_ms=call.latency_ms,
+                        tokens_in=call.tokens_in,
+                        tokens_out=call.tokens_out,
+                        used_llm=True,
+                        notes=[] if complaint is None else [f"retry still {complaint}"],
+                    )
+
+                logger.info("rewrite_for_finding retrying: %s", complaint)
+                attempt_payload = (
+                    f"{payload}\n\n"
+                    f"Your previous attempt was REJECTED because {complaint}.\n"
+                    f"Rejected attempt:\n{text}\n\n"
+                    "Write a new version that fixes the stated problem and "
+                    "keeps every fact, figure and unit already present."
+                )
+
+            if last is not None:
+                value, call = last
+                return AgentOutcome(
+                    value=value, agent="writer", model=call.model,
+                    latency_ms=call.latency_ms, tokens_in=call.tokens_in,
+                    tokens_out=call.tokens_out, used_llm=True,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("rewrite_for_finding fell back to rules: %s", exc)
             return AgentOutcome(
@@ -685,10 +946,30 @@ def _rule_rewrite(
     elif fid.endswith("overlong_bullets"):
         parts = re.split(r",\s+", text)
         if len(parts) > 1:
-            trimmed = parts[0].rstrip(".")
-            if len(trimmed.split()) >= 6:
-                text = trimmed + "."
-                reason = "Trimmed to the first clause to get under the length cap."
+            # Keeping only the first clause is what made
+            # bullet_overlong_and_padded fix one finding and raise another:
+            # the padding that made the bullet too long was also carrying the
+            # metric, so trimming produced experience.unquantified_bullets.
+            # Walk outwards instead and take the SHORTEST prefix that is long
+            # enough, short enough, and still carries a number if the original
+            # had one.
+            had_digit = bool(re.search(r"\d", text))
+            chosen = None
+            for cut in range(1, len(parts)):
+                candidate = ", ".join(parts[:cut]).rstrip(".")
+                words = candidate.split()
+                if len(words) < 6 or len(words) > BULLET_COACHED_MAX:
+                    continue
+                if had_digit and not re.search(r"\d", candidate):
+                    continue
+                chosen = candidate
+                break
+            if chosen is not None:
+                text = chosen + "."
+                reason = (
+                    "Trimmed to the shortest clause that stays under the "
+                    "length cap without dropping the metric."
+                )
 
     return {
         "target_ref": "",
@@ -699,22 +980,205 @@ def _rule_rewrite(
     }
 
 
+# A rule rewrite has to clear two bars, and the original map cleared both on
+# only three of its ten entries.
+#
+#   FAITHFUL -- it must not claim more than the original said. Three entries
+#   promoted a supporting role into a leading one:
+#       worked   -> delivered   "worked on X" is not "delivered X"
+#       helped   -> drove       helping is not driving
+#       involved -> led         involvement is not leadership
+#   Those are fabrications. The numeric guard cannot see them -- it only reads
+#   digits -- so unlike the model's inventions, which the guard catches every
+#   time, these shipped. They were produced deterministically by code we own,
+#   which makes them the worst kind in a project whose stated top invariant is
+#   zero fabrications.
+#
+#   EFFECTIVE -- the replacement must actually be an ACTION_VERB, or the
+#   finding stays open and the user is shown a suggestion that changes their
+#   wording and improves nothing:
+#       assisted     -> supported     not an action verb
+#       did          -> executed      not an action verb
+#       used         -> applied       not an action verb
+#       participated -> contributed   not an action verb
+#
+# What survives is the intersection. Where no faithful, effective swap exists,
+# the rule engine now declines -- which is the correct answer, and the one the
+# corpus already rewards over a cosmetic edit.
 _STRONGER = {
-    "worked": "delivered",
-    "helped": "drove",
-    "assisted": "supported",
-    "responsible": "owned",
+    "responsible": "owned",   # "responsible for X" does mean ownership of X
     "handled": "managed",
-    "did": "executed",
     "made": "built",
-    "used": "applied",
-    "participated": "contributed",
-    "involved": "led",
 }
 
 
 
 # ---------------------------------------------------------------- chat agent
+
+# ----------------------------------------------------------------- ats agent
+_STANDARD_SECTIONS = {
+    "work experience",
+    "education",
+    "projects",
+    "certifications",
+    "skills",
+    "volunteer experience",
+}
+
+
+def review_ats(
+    structured_data: dict, store: VectorStore | None = None
+) -> AgentOutcome:
+    """Judgement calls about machine-readability. Advisory, never scored.
+
+    The deterministic checks in `services/ats.py` own every point this
+    feature is worth. This agent exists for the two questions that rules
+    genuinely cannot answer -- is this oddly-named section actually the work
+    history, and what does this acronym stand for -- and its output is
+    presented as tips, not findings.
+
+    Keeping it out of the score is the whole design, not a limitation. A
+    score that moved because a model felt differently on a Tuesday would be
+    unreproducible, unexplainable, and impossible to test; the same reason
+    ScoringAgent is forbidden from touching the number.
+    """
+    sections = ats_rules.mislabelled_sections(structured_data)
+    acronyms = ats_rules.bare_acronyms(structured_data)
+
+    # The gate. No question, no call -- a tidy resume costs nothing.
+    if not sections and not acronyms:
+        return AgentOutcome(
+            value={"relabels": [], "expansions": [], "note": ""},
+            agent="ats",
+            notes=["no candidates"],
+        )
+
+    if not llm.is_configured():
+        return AgentOutcome(
+            value=_rule_ats_review(sections, acronyms),
+            agent="ats",
+            notes=["rule-engine ats review"],
+        )
+
+    context = "(none)"
+    if store is not None:
+        try:
+            hits = store.search(
+                "ats section headings parsing acronyms", corpus="ats_rules", k=4
+            )
+            context = _context_block(hits)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ATS retrieval failed: %s", exc)
+
+    payload_parts = []
+    if sections:
+        payload_parts.append(
+            "Custom sections that contain dated, job-shaped entries:\n"
+            + "\n".join(
+                f"- ref={s['ref']} title={s['title']!r} entries={s['sample']}"
+                for s in sections
+            )
+        )
+    if acronyms:
+        payload_parts.append("Skills written only as an acronym:\n" + ", ".join(acronyms))
+
+    try:
+        parsed, call = llm.structured(
+            task="ats",
+            system=prompts.ATS_REVIEW.format(context=context),
+            user="\n\n".join(payload_parts),
+            schema=AtsReview,
+            temperature=0.2,
+        )
+        return AgentOutcome(
+            value=_clean_ats_review(parsed, sections, acronyms),
+            agent="ats",
+            model=call.model,
+            latency_ms=call.latency_ms,
+            tokens_in=call.tokens_in,
+            tokens_out=call.tokens_out,
+            used_llm=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ATS agent fell back to rules: %s", exc)
+
+    return AgentOutcome(
+        value=_rule_ats_review(sections, acronyms),
+        agent="ats",
+        notes=["rule-engine ats review"],
+    )
+
+
+def _clean_ats_review(parsed: AtsReview, sections: list[dict], acronyms: list[str]) -> dict:
+    """Keep only what the model was actually asked about.
+
+    The same discipline as `_hard_check` on the writer path, for the same
+    reason: every fabrication we have ever caught in this codebase was caught
+    by a deterministic guard, never by a model policing itself. Here that
+    means a relabel must name a section we supplied and a standard target,
+    and an expansion must be of an acronym that is really on the resume.
+    """
+    known = {s["ref"]: s["title"] for s in sections}
+    relabels = []
+    for item in parsed.relabels or []:
+        ref = (item.ref or "").strip()
+        target = (item.suggested_title or "").strip()
+        if ref in known and target.lower() in _STANDARD_SECTIONS:
+            relabels.append(
+                {
+                    "ref": ref,
+                    "current_title": known[ref],
+                    "suggested_title": target,
+                    "reason": (item.reason or "").strip()[:240],
+                }
+            )
+
+    allowed = {a.upper() for a in acronyms}
+    expansions = []
+    for item in parsed.expansions or []:
+        token = (item.acronym or "").strip().upper()
+        full = (item.expanded or "").strip()
+        # An "expansion" that does not contain the acronym and is not longer
+        # than it is not an expansion.
+        if token in allowed and len(full) > len(token) + 3:
+            expansions.append(
+                {"acronym": token, "expanded": f"{full} ({token})" if token not in full else full}
+            )
+
+    return {
+        "relabels": relabels,
+        "expansions": expansions,
+        "note": (parsed.note or "").strip()[:400],
+    }
+
+
+def _rule_ats_review(sections: list[dict], acronyms: list[str]) -> dict:
+    """No model available: say nothing. Both halves need judgement.
+
+    This started out flagging the sections and staying quiet only about the
+    acronyms, on the theory that "a custom heading full of dated entries" was
+    something we had already established without a model. Running it over a
+    real resume killed that theory immediately: it flagged
+
+        "Leadership & Achievements"  ->  rename this to a standard heading
+
+    on a section that is genuinely a leadership-and-achievements section and
+    should keep its name. The shape we can detect -- dated entries, employer-
+    shaped text -- is identical for "My Journey" (really the work history, a
+    serious parse problem) and for that one (fine as it is). Telling the two
+    apart IS the judgement call, which is precisely why this is an agent and
+    not a rule.
+
+    So with no model there is no advice. The deterministic ATS findings in
+    services/ats.py are unaffected and still score; this feature simply goes
+    quiet, which is the correct way for an advisory layer to degrade. Bad
+    advice is worse than none, and renaming a section on our say-so is a
+    change the user would have to undo by hand.
+    """
+    return {"relabels": [], "expansions": [], "note": ""}
+
+
+
 def chat_reply(
     prompt: str,
     structured_data: dict,

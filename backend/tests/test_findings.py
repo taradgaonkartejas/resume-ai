@@ -322,7 +322,10 @@ def test_every_rewrite_finding_points_at_resolvable_text():
                     f"{finding.id} has action='rewrite' but target_ref "
                     f"{finding.target_ref!r} does not resolve"
                 )
-    assert checked >= 6, f"expected several rewrite findings, saw {checked}"
+    # A sentinel that the loop examined something, not a target. It fell
+    # from 6 to 5 when summary.no_metric and experience.unquantified_bullets
+    # dropped their AI action on purpose -- see the test below.
+    assert checked >= 4, f"expected several rewrite findings, saw {checked}"
 
 
 def test_no_bullets_has_no_ai_action():
@@ -333,3 +336,35 @@ def test_no_bullets_has_no_ai_action():
     data["experience"] = [{"company": "Acme", "role": "Eng", "dates": "", "bullets": []}]
     found = [f for f in _score_experience(data)[1] if f.id == "experience.no_bullets"]
     assert found and found[0].action == ""
+
+
+def test_the_findings_the_writer_must_decline_offer_no_ai_button():
+    """The reported 422s: four failed rewrites in one sitting.
+
+    `summary.no_metric` and `experience.unquantified_bullets` advertised
+    action="rewrite", yet they are precisely the cases the writer corpus
+    marks must-decline -- every writer report scores "resisted inventing
+    3/3" as a pass. The button could only ever 422, after burning two
+    server-side model attempts. Missing numbers come from the user.
+    """
+    from app.services.heuristics import _score_experience, _score_summary
+    from app.services.parsing import empty_resume
+
+    data = empty_resume()
+    data["summary"] = {"text": "Engineer who worked on things for a while in roles."}
+    data["experience"] = [
+        {
+            "company": "Acme", "role": "Eng", "dates": "2020-2024",
+            "bullets": ["Worked on the platform", "Helped with deploys"],
+        }
+    ]
+
+    offered = {
+        f.id: f.action
+        for scorer in (_score_summary, _score_experience)
+        for f in scorer(data)[1]
+    }
+    assert offered.get("summary.no_metric") != "rewrite"
+    assert offered.get("experience.unquantified_bullets") != "rewrite"
+    # The finding itself must survive -- the score still docks for it.
+    assert "summary.no_metric" in offered

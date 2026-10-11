@@ -534,3 +534,67 @@ def test_tailoring_can_opt_out_of_forking(client, priya, priya_resume):
         json={"jd_content": "Terraform Kubernetes", "fork": False},
     ).json()
     assert session["resume_id"] == priya_resume
+
+
+# ------------------------------------------------- analysis prose reaches the client
+def test_analysis_returns_commentary_and_ats_review(client, priya, priya_resume):
+    """The LLM layer was write-only: computed, persisted, never returned.
+
+    Both fields must be present and correctly shaped even with no provider
+    key, because the client renders them conditionally and `undefined` is not
+    the same as "nothing to say".
+    """
+    headers = {"X-User-Id": priya}
+    body = client.post(f"/api/resumes/{priya_resume}/analyze", headers=headers).json()
+
+    assert set(body["commentary"]) == {"headline", "category_notes"}
+    assert set(body["ats_review"]) == {"relabels", "expansions", "note"}
+    assert isinstance(body["ats_review"]["relabels"], list)
+    assert isinstance(body["ats_review"]["expansions"], list)
+    # Operator data stays server-side.
+    assert "trace" not in body
+
+
+def test_commentary_survives_the_database_round_trip(client, priya, priya_resume):
+    """POST builds it in memory; GET reads it back out of a JSON column."""
+    headers = {"X-User-Id": priya}
+    posted = client.post(f"/api/resumes/{priya_resume}/analyze", headers=headers).json()
+    fetched = client.get(f"/api/resumes/{priya_resume}/analysis", headers=headers).json()
+
+    assert fetched["commentary"] == posted["commentary"]
+    assert fetched["ats_review"] == posted["ats_review"]
+    assert fetched["commentary"]["headline"]
+
+
+def test_a_mislabelled_section_reaches_the_client(client, priya):
+    """End to end: a custom section full of dated jobs is surfaced.
+
+    Without a provider key the agent stays silent by design, so this asserts
+    the transport rather than the judgement -- the field is present, typed
+    and empty, which is what the UI must handle.
+    """
+    from tests.conftest import new_resume
+
+    resume_id = new_resume(
+        client, priya, "Creative headings",
+        {
+            "contact": {"name": "Jane Doe", "email": "j@x.com"},
+            "summary": {"text": "Backend engineer with eight years of experience."},
+            "experience": [],
+            "education": [],
+            "skills": [{"label": "", "items": ["Python", "PMP"]}],
+            "extras": [{
+                "kind": "custom", "title": "My Journey",
+                "entries": [
+                    {"primary": "Senior Engineer", "secondary": "Globex",
+                     "date": "2018 - 2020", "detail": ""},
+                    {"primary": "Engineer", "secondary": "Initech",
+                     "date": "2016 - 2018", "detail": ""},
+                ],
+            }],
+        },
+    )
+    headers = {"X-User-Id": priya}
+    body = client.post(f"/api/resumes/{resume_id}/analyze", headers=headers).json()
+    assert body["ats_review"]["relabels"] == []
+    assert body["ats_review"]["expansions"] == []

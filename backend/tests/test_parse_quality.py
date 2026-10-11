@@ -11,7 +11,12 @@ from docx import Document
 from reportlab.pdfgen import canvas
 
 from app.services.exceptions import ResumeNotReady
-from app.services.parsing import MIN_WORDS_PDF, extract_text, structure_text
+from app.services.parsing import (
+    MIN_WORDS_PDF,
+    _split_date_tail,
+    extract_text,
+    structure_text,
+)
 
 
 # ----------------------------------------------------------- §3.6 numbered
@@ -203,3 +208,93 @@ def test_scanned_pdf_note_differs_from_empty_file_note():
 
     assert "scanned image" in _extraction_failure("scan.pdf", "Jane Doe")
     assert "scanned image" not in _extraction_failure("cv.txt", "")
+
+
+# ---------------------------------------------------------------------------
+# One real resume that parsed into two employers and six schools
+# ---------------------------------------------------------------------------
+
+#: Lifted verbatim from Tejas_Taradgaonkar_Resume_react_java.pdf, which
+#: reproduced every defect below. Stored as text, not as a PDF: the bugs are
+#: in structure_text, and a binary fixture would make this depend on
+#: pdfplumber's layout engine instead of on the thing under test.
+#: NOTE: the long lines below are the fixture. Where a line wraps is
+#: precisely what is under test, so they are marked rather than reflowed.
+_REAL = "\n".join([
+    "TEJAS SURAJ TARADGAONKAR",
+    "",
+    "EXPERIENCE",
+    "Software Engineer | Ceinsys Tech Ltd. Apr 2024 – Present",
+    "• Architected a RabbitMQ-based microservices pipeline using version control best practices to manage code changes,",  # noqa: E501
+    "implementing prefetch-controlled consumers and heartbeat-safe threading to lift throughput to 10 jobs/hour.",  # noqa: E501
+    "• Engineered Java Full Stack solutions, designing and shipping RESTful APIs and service-to-service integrations across",  # noqa: E501
+    "Java/Spring Boot and Python/FastAPI services, while performing backend development to optimize PostgreSQL/PostGIS",  # noqa: E501
+    "queries and cut p95 response time by 100%.",
+    "• Standardized deployment by containerizing the pipeline with Docker, resolving runtime ABI/dependency mismatches to",  # noqa: E501
+    "cut build failures by 20%, while safeguarding data integrity with transactional ORM patterns and sanitized import",  # noqa: E501
+    "handling that eliminated encoding/null-byte corruption.",
+    "EDUCATION",
+    "Post Graduate Diploma in Advanced Computing (PG-DAC) — CDAC, Pune 2024 | Pune",
+    "Score: 73%",
+    "B.E. (Mechanical) — Vishwakarma Institute of Technology (VIT) 2020 | Pune",
+    "CGPA: 7.79",
+    "XII (HSC) — Modern College of Science, Commerce & Arts 2016 | Pune",
+    "Score: 67.85%",
+    "",
+])
+
+def test_a_bullet_that_wraps_onto_a_capital_is_not_a_new_employer():
+    """The reported bug: one job parsed as two.
+
+    Bullet two wraps onto "Java/Spring Boot ...". The continuation test only
+    accepted a line starting lowercase, so the capital J closed the entry and
+    the next fragment -- "queries and cut p95 response time by 100%." --
+    became a company.
+    """
+    exp = structure_text(_REAL)["experience"]
+    assert len(exp) == 1, [e["company"] for e in exp]
+    assert exp[0]["bullets"][1].endswith("cut p95 response time by 100%.")
+    assert len(exp[0]["bullets"]) == 3
+
+
+def test_role_and_company_are_ordered_by_evidence_not_position():
+    """`Role | Company` is at least as common as `Company | Role`."""
+    entry = structure_text(_REAL)["experience"][0]
+    assert entry["company"] == "Ceinsys Tech Ltd."
+    assert entry["role"] == "Software Engineer"
+    assert entry["dates"] == "Apr 2024 – Present"
+
+
+def test_the_company_first_order_still_parses_the_same_way():
+    """The fix may only correct an unambiguous case; a tie keeps the order."""
+    entry = structure_text(
+        "EXPERIENCE\nAcme Corp | Senior Engineer Jan 2020 - Dec 2023\n• Did a thing.\n"
+    )["experience"][0]
+    assert entry["company"] == "Acme Corp"
+    assert entry["role"] == "Senior Engineer"
+
+
+def test_a_grade_line_is_a_property_of_the_school_above_it():
+    """"Score: 73%" was becoming a school of its own -- and reaching exports."""
+    edu = structure_text(_REAL)["education"]
+    assert len(edu) == 3, [e["school"] for e in edu]
+    # The measure is kept only when the number cannot speak for itself:
+    # "73%" is self-describing, a bare "7.79" is not, so CGPA is preserved.
+    assert [e["grade"] for e in edu] == ["73%", "CGPA 7.79", "67.85%"]
+
+
+def test_school_degree_dates_and_location_each_land_in_their_own_field():
+    first = structure_text(_REAL)["education"][0]
+    assert first["school"] == "CDAC, Pune"
+    assert first["degree"] == "Post Graduate Diploma in Advanced Computing (PG-DAC)"
+    assert first["dates"] == "2024"
+    assert first["location"] == "Pune"
+
+
+def test_a_city_before_a_year_is_not_read_as_a_month():
+    """`[A-Za-z]{3,9}\\s?\\d{4}` matched "Pune 2024" and called it a date."""
+    assert _split_date_tail("CDAC, Pune 2024") == ("CDAC, Pune", "2024")
+    assert _split_date_tail("Acme Corp Apr 2024 – Present") == (
+        "Acme Corp",
+        "Apr 2024 – Present",
+    )

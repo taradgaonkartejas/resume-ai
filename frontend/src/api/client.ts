@@ -37,12 +37,36 @@ export class ApiError extends Error {
   /** True when the request never got a response: timeout, abort, or the
    *  backend being down. */
   readonly isTimeout: boolean;
+  /** Machine-readable cause from the response body, when the backend sent
+   *  one. Only 422s from /rewrite carry it today. Prose is for the user;
+   *  this is for the code, which must not grep a sentence to decide what to
+   *  offer next. */
+  readonly reason?: string;
 
-  constructor(status: number, message: string, isTimeout = false) {
+  constructor(status: number, message: string, isTimeout = false, reason?: string) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.isTimeout = isTimeout;
+    this.reason = reason;
+  }
+
+  /** The failure is upstream and transient, so retrying is meaningful.
+   *
+   *  Worth distinguishing in the UI: a 422 means "what you asked for cannot be
+   *  done" and a red, final-looking message is right. A 503 means "we could
+   *  not reach the model just now", which is not the user's fault and not a
+   *  dead end -- painting it the same red tells them they were refused. */
+  get isTransient(): boolean {
+    return this.isTimeout || this.status === 503 || this.status === 429;
+  }
+
+  /** Nothing the user can do will change this answer, so do not offer a
+   *  retry. `needs_your_fact` means the writer is refusing to invent a
+   *  number it cannot find in the resume -- a rule, not a hiccup. Asking
+   *  again just replays two model calls to reach the same 422. */
+  get isFinalRefusal(): boolean {
+    return this.reason === "needs_your_fact";
   }
 
   /** The backend returns 404 both for a missing resume and for one owned by
@@ -145,10 +169,11 @@ apiClient.interceptors.response.use(
       }
 
       const { status, statusText, data } = err.response;
-      const detail =
-        data instanceof Blob ? await detailFromBlob(data) : (data as { detail?: unknown })?.detail;
+      const body = data instanceof Blob ? undefined : (data as { detail?: unknown; reason?: unknown });
+      const detail = data instanceof Blob ? await detailFromBlob(data) : body?.detail;
+      const reason = typeof body?.reason === "string" ? body.reason : undefined;
 
-      throw new ApiError(status, describe(detail, statusText || "Request failed"));
+      throw new ApiError(status, describe(detail, statusText || "Request failed"), false, reason);
     }
 
     throw new ApiError(0, error instanceof Error ? error.message : "Unknown error");

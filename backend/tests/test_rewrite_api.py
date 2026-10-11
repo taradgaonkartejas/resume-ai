@@ -18,7 +18,14 @@ DOC = {
         {
             "company": "Acme", "role": "Platform Engineer", "dates": "2020-2024",
             "bullets": [
-                "Worked on the deployment pipeline",
+                # "Worked on X" has no faithful strong replacement -- "delivered"
+                # claims a completion the source never asserted -- so the rule
+                # engine now declines it and /rewrite answers 422. That is the
+                # intended behaviour and is asserted in
+                # test_an_honest_decline_is_a_422. These tests are about the
+                # suggestion lifecycle, not the rubric, so the fixture uses a
+                # verb that does have a faithful swap: responsible -> owned.
+                "Responsible for the deployment pipeline",
                 "Helped with monitoring " + ("word " * 50),
             ],
         }
@@ -50,6 +57,25 @@ def _rewrite(client, headers, resume, ref, **body):
 
 
 # ------------------------------------------------------------------ contract
+def test_an_honest_decline_is_a_422(client, headers, resume):
+    """Offline, a weak verb with no faithful replacement produces no suggestion.
+
+    "Helped with monitoring..." cannot be strengthened without claiming more
+    than it says: `helped -> drove` asserts the candidate drove the work. The
+    rule engine used to make exactly that swap, and the numeric guard could
+    not see it because no digit is involved -- so it shipped.
+
+    Declining is the correct answer, and the documented contract for "the
+    writer ran and could not help" is 422, not a cosmetic edit that leaves the
+    finding open.
+    """
+    resp = _rewrite(
+        client, headers, resume, "exp_0.bullet_1",
+        finding_id="experience.weak_verbs",
+    )
+    assert resp.status_code == 422, resp.text
+
+
 def test_weak_verb_rewrite_creates_a_pending_suggestion(client, headers, resume):
     resp = _rewrite(client, headers, resume, "exp_0.bullet_0", finding_id="experience.weak_verbs")
     assert resp.status_code == 201
@@ -131,6 +157,9 @@ def test_an_ungrounded_draft_is_never_persisted(client, headers, resume):
         resp = _rewrite(client, headers, resume, "exp_0.bullet_0")
     assert resp.status_code == 422
     assert "reject" in resp.json()["detail"].lower()
+    # Machine-readable, so the client need not grep prose to decide whether
+    # retrying is worth offering. A critic rejection is worth another go.
+    assert resp.json()["reason"] == "critic_rejected"
 
     listed = client.get(f"/api/resumes/{resume}", headers=headers)
     assert listed.status_code == 200
@@ -201,3 +230,20 @@ def test_omitting_finding_id_picks_the_first_finding_for_that_ref():
 
     explicit = _finding_for(DOC, "experience.weak_verbs", "exp_0.bullet_0")
     assert explicit["id"] == "experience.weak_verbs"
+
+
+def test_a_422_says_why_in_a_field_the_client_can_branch_on(client, headers, resume):
+    """The 422 body used to carry prose only.
+
+    With no machine-readable cause, the UI showed the same "Try again" for a
+    transient critic rejection and for a permanent "only you know this
+    number" decline -- so users retried a request that could never succeed.
+    """
+    resp = _rewrite(
+        client, headers, resume, "exp_0.bullet_1",
+        finding_id="experience.weak_verbs",
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["reason"] in {
+        "needs_your_fact", "critic_rejected", "nothing_to_rewrite",
+    }

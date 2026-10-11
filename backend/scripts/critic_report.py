@@ -8,12 +8,15 @@ The --llm run needs UNOROUTER_API_KEY. Use it to answer the question the test
 suite cannot answer offline: does TASK_EFFORT["critique"] = "minimal" keep the
 critic as strict as it was?
 
-The free tier allows one request per minute per model per account, so an
-unpaced run throttles after the first few cases and every later case degrades
-to rules. --sleep trades wall-clock time for a result that means something:
-18 cases at the default 60s is roughly 18 minutes. Slow and true beats fast
-and meaningless -- an unpaced run once reported "the LLM critic is adding
-nothing" when the LLM had not run at all.
+An unpaced run throttles and every later case degrades to rules, so --sleep
+trades wall-clock time for a result that means something. The right value
+depends entirely on the provider: UnoRouter's one-request-per-minute free tier
+needed 60s and turned the corpus into an ~18-minute job; NVIDIA and Groq are
+comfortable at 3s, which is under a minute for the whole set.
+
+Never set it to 0. An unpaced run once reported "the LLM critic is adding
+nothing over the rule engine" when the LLM had not run at all -- every call
+had 403'd, and the report scored the silence.
 """
 
 from __future__ import annotations
@@ -67,15 +70,28 @@ def main() -> int:
 
     use_llm = args.llm
     if use_llm and not llm.is_configured():
-        print("UNOROUTER_API_KEY is not set -- cannot score the LLM critic.")
+        print("No provider API key is set -- cannot score the LLM critic.")
+        print("Set at least one of NVIDIA_API_KEY / GROQ_API_KEY / "
+              "UNOROUTER_API_KEY in backend/.env.")
         return 2
 
-    effort = llm.effort_for("critique")
     model = llm.resolve_chain("critique")[0] if use_llm else "-"
+    # Pass the model: effort_for() maps "minimal" onto whatever the chosen
+    # vendor actually accepts, and the header must state what was sent, not
+    # what was asked for.
+    effort = llm.effort_for("critique", model) if use_llm else None
+    wanted = llm.TASK_EFFORT.get("critique")
     print(f"\ncritic corpus: {len(CASES)} cases "
           f"({len(fabrications())} fabrications, {len(faithful())} faithful)")
     if use_llm:
-        print(f"model: {model}   reasoning_effort: {effort or 'provider default'}")
+        shown = effort or "provider default"
+        if wanted and effort and effort != wanted:
+            shown = f"{effort} (asked for {wanted!r}; this vendor has no such level)"
+        print(f"model: {model}   reasoning_effort: {shown}")
+        rest = llm.resolve_chain("critique")[1:]
+        if rest:
+            print(f"       (falls back to {' -> '.join(rest)} if that one fails, "
+                  "so a verdict may not come from the model named above)")
 
     width = max(len(c["id"]) for c in CASES) + 2
     header = f"{'case':<{width}}{'kind':<11}{'want':<9}{'rules':<9}"

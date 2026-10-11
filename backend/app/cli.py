@@ -701,6 +701,219 @@ def cmd_migrate_down(args) -> int:
 
 
 # --------------------------------------------------------------------- main
+
+# ----------------------------------------------------------------- storage
+# Written after a blanket `rm -rf data/` destroyed 110 MB that nobody had
+# asked to lose. The directory mixes three very different things -- live
+# uploads that back real resume rows, exports that can always be
+# regenerated, and test detritus -- and "delete the data folder" is not a
+# safe instruction for any of them. So: classify first, delete only what is
+# provably unwanted, and make DRY RUN THE DEFAULT.
+
+_TEST_FIXTURE_NAMES = {"cv.txt", "jane.txt", "broken.pdf", "up.txt", "r.pdf"}
+
+
+def _storage_scan():
+    """Classify every object under data/ against the database.
+
+    Returns (live, orphans, exports, fixtures, total_bytes). An upload is
+    LIVE if some resumes.storage_key points at it; anything else under
+    uploads/ is an orphan. Exports are regenerable by definition.
+    """
+    from app.config import ROOT_DIR, settings
+
+    # NOT `from app.db import DATA_DIR`. app/db.py builds the engine at module
+    # scope (line 66), so merely importing it for a constant is enough to
+    # raise on a bad DSN or a missing driver -- which is exactly the state
+    # this function has to survive. Derive the path instead.
+    data_dir = ROOT_DIR / "data"
+
+    live_keys: set[str] = set()
+    try:
+        # Imported INSIDE the try on purpose. Creating the engine can fail at
+        # import time -- a missing psycopg2, a bad DSN -- and when it did, the
+        # traceback escaped and the user saw a crash rather than a refusal.
+        # Nothing was deleted, but "it exploded" and "it declined" must not
+        # look the same for a tool whose job is to delete files.
+        from sqlalchemy import select
+
+        from app.db import SessionLocal
+        from app.models import Resume
+
+        with SessionLocal() as db:
+            live_keys = {
+                k for (k,) in db.execute(select(Resume.storage_key)).all() if k
+            }
+    except Exception as exc:  # noqa: BLE001
+        warn(f"Could not read the database: {type(exc).__name__}: {str(exc)[:90]}")
+        warn("Refusing to classify anything as an orphan without it —")
+        warn("every upload would look unreferenced and be deleted.")
+        return None
+
+    uploads = data_dir / settings.s3_bucket_uploads
+    exports = data_dir / settings.s3_bucket_exports
+
+    live, orphans, export_files, fixtures = [], [], [], []
+    for path in sorted(uploads.rglob("*")) if uploads.exists() else []:
+        if not path.is_file():
+            continue
+        key = str(path.relative_to(uploads)).replace("\\", "/")
+        if key in live_keys:
+            live.append(path)
+        elif path.name in _TEST_FIXTURE_NAMES:
+            fixtures.append(path)
+        else:
+            orphans.append(path)
+    for path in sorted(exports.rglob("*")) if exports.exists() else []:
+        if path.is_file():
+            export_files.append(path)
+    return live, orphans, export_files, fixtures
+
+
+def _size(paths) -> str:
+    total = sum(p.stat().st_size for p in paths if p.exists())
+    for unit in ("B", "KB", "MB", "GB"):
+        if total < 1024:
+            return f"{total:.0f}{unit}"
+        total /= 1024.0
+    return f"{total:.1f}TB"
+
+
+def cmd_storage_status(args) -> int:
+    scanned = _storage_scan()
+    if scanned is None:
+        return 1
+    live, orphans, exports, fixtures = scanned
+    print()
+    ok(f"live uploads      {len(live):>6}  {_size(live):>8}"
+       "   referenced by a resume — never pruned")
+    dim(f"  orphaned uploads  {len(orphans):>6}  {_size(orphans):>8}"
+        "   no row points at these")
+    dim(f"  test fixtures     {len(fixtures):>6}  {_size(fixtures):>8}"
+        "   cv.txt / jane.txt / broken.pdf")
+    dim(f"  exports           {len(exports):>6}  {_size(exports):>8}"
+        "   regenerable on demand")
+    print()
+    return 0
+
+
+def cmd_storage_prune(args) -> int:
+    """Delete only what is provably unwanted. Dry run unless --force."""
+    scanned = _storage_scan()
+    if scanned is None:
+        return 1
+    live, orphans, exports, fixtures = scanned
+
+    doomed: list = []
+    doomed += fixtures
+    if not args.keep_orphans:
+        doomed += orphans
+    if args.exports:
+        doomed += exports
+
+    print()
+    dim(f"  keeping   {len(live)} live upload(s)  {_size(live)}")
+    if args.keep_orphans:
+        dim(f"  keeping   {len(orphans)} orphan(s) (--keep-orphans)")
+    if not args.exports:
+        dim(f"  keeping   {len(exports)} export(s) — pass --exports to include them")
+
+    if not doomed:
+        ok("Nothing to prune.")
+        return 0
+
+    for path in doomed[:10]:
+        dim(f"    {path}")
+    if len(doomed) > 10:
+        dim(f"    … and {len(doomed) - 10} more")
+
+    if not args.force:
+        print()
+        warn(f"DRY RUN — would delete {len(doomed)} file(s), {_size(doomed)}.")
+        warn("Re-run with --force to actually delete.")
+        return 0
+
+    freed = _size(doomed)
+    for path in doomed:
+        try:
+            path.unlink()
+        except OSError as exc:
+            warn(f"{path}: {exc}")
+    # Remove the directories that just became empty, deepest first.
+    from app.config import ROOT_DIR
+
+    for path in sorted((ROOT_DIR / "data").rglob("*"), key=lambda p: -len(p.parts)):
+        if path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+    print()
+    ok(f"Pruned {len(doomed)} file(s), freed {freed}. {len(live)} live upload(s) untouched.")
+    return 0
+
+
+
+def cmd_storage_verify(args) -> int:
+    """Report resume rows whose file is MISSING. The inverse of prune.
+
+    `prune` answers "which files have no row?". This answers the question
+    that actually hurts: "which rows have no file?" -- a resume the user can
+    open in the UI but cannot re-parse, re-export or download, because the
+    object behind it is gone.
+
+    Written after `rm -rf data/` removed 110 MB. Nothing was lost that time,
+    but there was no way to establish that except by reading filenames by
+    hand. A restore needs to start with an accurate list of what is actually
+    broken.
+    """
+    from app.config import ROOT_DIR, settings
+
+    data_dir = ROOT_DIR / "data"
+    uploads = data_dir / settings.s3_bucket_uploads
+
+    try:
+        from sqlalchemy import select
+
+        from app.db import SessionLocal
+        from app.models import Resume
+
+        with SessionLocal() as db:
+            rows = db.execute(
+                select(Resume.id, Resume.title, Resume.storage_key)
+            ).all()
+    except Exception as exc:  # noqa: BLE001
+        warn(f"Could not read the database: {type(exc).__name__}: {str(exc)[:90]}")
+        return 1
+
+    intact, missing, no_file = [], [], []
+    for rid, title, key in rows:
+        if not key:
+            no_file.append((rid, title))
+        elif (uploads / key).exists():
+            intact.append((rid, title))
+        else:
+            missing.append((rid, title, key))
+
+    print()
+    ok(f"{len(intact)} resume(s) have their uploaded file")
+    if no_file:
+        dim(f"  {len(no_file)} resume(s) never had one (created in-app, not uploaded)")
+
+    if not missing:
+        ok("No resume is missing its file.")
+        print()
+        return 0
+
+    warn(f"{len(missing)} resume(s) are MISSING their uploaded file:")
+    for rid, title, key in missing:
+        print(f"    {str(rid)[:8]}  {title[:44]:<46} {key}")
+    print()
+    dim("  These rows still work for editing, scoring and export —")
+    dim("  the structured data lives in the database, not the file.")
+    dim("  What breaks is re-parsing and downloading the original.")
+    dim("  Re-upload the source file to restore it.")
+    print()
+    return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m app.cli",
@@ -742,6 +955,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp = db.add_parser("sql", help="print the DDL")
     sp.add_argument("--out", nargs="?", const="schema.sql", help="write to a file")
     sp.set_defaults(func=cmd_sql)
+
+    st = sub.add_parser("storage", help="local object storage under data/").add_subparsers(
+        dest="cmd", required=True
+    )
+    st.add_parser("status", help="classify everything under data/").set_defaults(
+        func=cmd_storage_status
+    )
+    st.add_parser(
+        "verify", help="report resume rows whose uploaded file is missing"
+    ).set_defaults(func=cmd_storage_verify)
+    sp = st.add_parser("prune", help="delete only unreferenced objects (dry run by default)")
+    sp.add_argument("--force", action="store_true", help="actually delete")
+    sp.add_argument("--exports", action="store_true", help="also prune exports")
+    sp.add_argument("--keep-orphans", action="store_true", help="only prune test fixtures")
+    sp.set_defaults(func=cmd_storage_prune)
 
     mig = sub.add_parser("migrate", help="versioned migrations").add_subparsers(
         dest="cmd", required=True

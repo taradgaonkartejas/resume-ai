@@ -34,6 +34,10 @@ param(
     [Parameter(Position = 0)]
     [string]$Target = 'help',
 
+    # Which provider to probe, for: .\make.ps1 models-probe groq
+    [Parameter(Position = 1)]
+    [string]$Provider = 'nvidia',
+
     # Migration message, for: .\make.ps1 migrate -m "..."
     [Alias('m')]
     [string]$Message,
@@ -140,8 +144,14 @@ function Show-Help {
     Write-Host ""
     Write-Host "AI transport (needs UNOROUTER_API_KEY in backend\.env)" -ForegroundColor Yellow
     Write-Host "  models              which models the key can actually call"
+    Write-Host "  cov                 coverage, hermetic (no API calls)"
+    Write-Host "  test-live           ALSO run tests that call real providers"
+    Write-Host "  env-check           every import is declared in environment.yaml"
+    Write-Host "  models-gen          time a REAL ~40-word generation per task"
+    Write-Host "  models-gen-all [prov] real generation on EVERY free model"
+    Write-Host "  models-probe [prov] probe EVERY model a provider advertises"
     Write-Host "  critic-report       score the rule critic offline"
-    Write-Host "  critic-report-llm   ... and the live LLM critic, paced for the free tier"
+    Write-Host "  critic-report-llm   ... and the live LLM critic (paced; ~1 min)"
     Write-Host ""
     Write-Host "Schema (app/models.py is the source of truth)" -ForegroundColor Yellow
     Write-Host "  db-push         create database + tables to match the models"
@@ -233,10 +243,28 @@ switch ($Target.ToLowerInvariant()) {
     'migrate-down'   { Invoke-Cli @('migrate', 'down') }
 
     'models'         { Invoke-Py @('-m', 'scripts.check_model_access') }
+    'models-gen-all' {
+        Invoke-Py @('-m', 'scripts.check_model_access', '--generate-all', $Provider)
+    }
+    'models-gen'     {
+        # A 1-token ping measures queueing, not work.
+        Invoke-Py @('-m', 'scripts.check_model_access', '--generate')
+    }
+    'models-probe'   {
+        # Catalogue listing != entitlement. Probes every chat model the
+        # provider advertises so a replacement id is chosen from what
+        # answered, not from what looked plausible.
+        Invoke-Py @('-m', 'scripts.check_model_access', '--probe', $Provider)
+    }
     'critic-report'  { Invoke-Py @('-m', 'scripts.critic_report') }
-    'critic-report-llm' { Invoke-Py @('-m', 'scripts.critic_report', '--llm', '--sleep', '60') }
+    'writer-report' { Invoke-Py @('-m', 'scripts.writer_report') }
+    'writer-report-llm' { Invoke-Py @('-m', 'scripts.writer_report', '--llm', '--sleep', '3') }
+    'critic-report-llm' { Invoke-Py @('-m', 'scripts.critic_report', '--llm', '--sleep', '3') }
 
     'test'           { Invoke-Py @('-m', 'pytest', '-q') }
+    'test-live'      { Invoke-Py @('-m', 'pytest', '-q', '--live') }
+    'cov'            { Invoke-Py @('-m', 'pytest', '-q', '--cov=app', '--cov=scripts', '--cov-report=term-missing') }
+    'env-check'      { Invoke-Py @('scripts/check_env_declares_imports.py') }
     'lint'           { Invoke-Py @('-m', 'ruff', 'check', 'app', 'tests') }
     'run'            { Invoke-Py @('-m', 'uvicorn', 'app.main:app', '--reload', '--host', '0.0.0.0', '--port', '8000') }
 

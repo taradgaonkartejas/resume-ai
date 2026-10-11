@@ -3,6 +3,7 @@ import { ChevronDown, Loader2, RefreshCw, Sparkles, Wand2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScoreRing } from "@/features/analysis/ScoreRing";
 import { AnalysisStepper } from "@/features/analysis/AnalysisStepper";
+import { AtsReviewCard } from "@/features/analysis/AtsReviewCard";
 import { band } from "@/lib/score";
 import { useAnalysis, useRunAnalysis } from "@/api/queries";
 import { ApiError } from "@/api/client";
@@ -90,6 +91,10 @@ export function AnalysisPane({ resumeId }: { resumeId: string | null }) {
   const tone = band(analysis.overall_score);
   const gap = pointsTo80(analysis.overall_score);
   const findings = totalFindings(analysis);
+  // Written by ScoringAgent, persisted since the graph was built, and until
+  // now returned by no endpoint and rendered by nothing. Optional-chained
+  // because an analysis stored before the field existed has no commentary.
+  const headline = analysis.commentary?.headline?.trim() ?? "";
 
   return (
     <div className="space-y-4">
@@ -105,6 +110,9 @@ export function AnalysisPane({ resumeId }: { resumeId: string | null }) {
               : "Above the 80-point bar"}
             {findings > 0 && ` · ${findings} recommended improvement${findings === 1 ? "" : "s"}`}
           </p>
+          {headline && (
+            <p className="mt-2 text-xs leading-relaxed text-content">{headline}</p>
+          )}
           {analysis.role_tags.length > 0 && (
             <div className="mt-2 flex flex-wrap gap-1">
               {analysis.role_tags.map((tag) => (
@@ -201,6 +209,8 @@ export function AnalysisPane({ resumeId }: { resumeId: string | null }) {
           );
         })}
       </div>
+
+      <AtsReviewCard review={analysis.ats_review} />
     </div>
   );
 }

@@ -19,9 +19,9 @@ PY := $(shell \
 
 # Windows: use .\make.ps1 <target> instead — same target names.
 
-.PHONY: help up down logs ps doctor which-python env env-file env-update db-push db-status db-seed db-reset \
+.PHONY: writer-report writer-report-llm help up down logs ps doctor which-python env env-file env-update db-push db-status db-seed db-reset \
         db-inspect db-sql db-create db-drop migrate migrate-deploy migrate-status \
-        migrate-down test lint run models critic-report critic-report-llm
+        migrate-down test lint run test-live cov env-check models models-probe models-gen models-gen-all critic-report critic-report-llm ats-report ats-report-llm ats-report-holdout storage-status storage-verify storage-prune storage-prune-hard
 
 help:
 	@echo "Services (docker compose, run from the repo root)"
@@ -59,8 +59,22 @@ help:
 	@echo ""
 	@echo "AI transport (needs UNOROUTER_API_KEY in backend/.env)"
 	@echo "  make models              which models the key can actually call"
+	@echo "  make cov                 coverage, hermetic (no API calls)"
+	@echo "  make test-live           ALSO run tests that call real providers"
+	@echo "  make env-check           every import is declared in environment.yaml"
+	@echo "  make models-gen          time a REAL ~40-word generation per task"
+	@echo "  make models-gen-all      time a real generation on EVERY free model"
+	@echo "  make models-probe        probe EVERY model a provider advertises"
+	@echo "                           (PROVIDER=nvidia|groq, takes a few minutes)"
+	@echo "  make storage-status      classify everything under data/"
+	@echo "  make storage-verify      report resumes whose uploaded file is missing"
+	@echo "  make storage-prune       delete fixtures + orphans (keeps live + exports)"
+	@echo "  make storage-prune-hard  ... and exports too"
+	@echo "  make ats-report          check the ATS gate offline (free)"
+	@echo "  make ats-report-llm      score ATS judgement, dev split (3 runs)"
+	@echo "  make ats-report-holdout  the measurement that counts -- run ONCE"
 	@echo "  make critic-report       score the rule critic offline"
-	@echo "  make critic-report-llm   ... and the live LLM critic, paced for the free tier"
+	@echo "  make critic-report-llm   ... and the live LLM critic (paced; ~1 min)"
 
 # `up` waits on db only: a bare --wait fails when the one-shot minio-init exits.
 up:
@@ -145,6 +159,15 @@ migrate-down:
 test:
 	$(PY) -m pytest -q
 
+env-check:
+	$(PY) scripts/check_env_declares_imports.py
+
+test-live:
+	$(PY) -m pytest -q --live
+
+cov:
+	$(PY) -m pytest -q --cov=app --cov=scripts --cov-report=term-missing
+
 lint:
 	$(PY) -m ruff check app tests
 
@@ -153,14 +176,59 @@ lint:
 models:
 	$(PY) -m scripts.check_model_access
 
+# Catalogue listing != entitlement. `make models` only tests the ids we have
+# configured; this probes EVERY chat model the provider advertises, so you can
+# pick a replacement from what answered rather than from what looked plausible.
+# PROVIDER defaults to nvidia: make models-probe PROVIDER=groq
+models-probe:
+	$(PY) -m scripts.check_model_access --probe $(or $(PROVIDER),nvidia)
+
+# A 1-token ping measures queueing, not work. This times a ~40-word rewrite
+# on each task model, which is what actually times out.
+models-gen:
+	$(PY) -m scripts.check_model_access --generate
+
+# Pick a replacement writer on measured generation latency, not a ping.
+models-gen-all:
+	$(PY) -m scripts.check_model_access --generate-all $(or $(PROVIDER),nvidia)
+
 critic-report:
 	$(PY) -m scripts.critic_report
 
-# --sleep because the free tier allows one request per minute per model per
-# account: an unpaced run throttles and every case degrades to the rule
-# engine, which once produced a confident and completely false quality verdict.
+# --sleep keeps the run inside the provider's rate limit. It was 60s on
+# UnoRouter (1 req/min/model); on NVIDIA/Groq 3s is ample, so the corpus goes
+# from ~18 minutes to under a minute. Never drop it to 0: an unpaced run
+# throttles, every case degrades to the rule engine, and the report once
+# produced a confident and completely false quality verdict as a result.
+storage-status:
+	$(PY) -m app.cli storage status
+
+storage-verify:
+	$(PY) -m app.cli storage verify
+
+storage-prune:
+	$(PY) -m app.cli storage prune --force
+
+storage-prune-hard:
+	$(PY) -m app.cli storage prune --force --exports
+
+ats-report:
+	$(PY) -m scripts.ats_report
+
+ats-report-llm:
+	$(PY) -m scripts.ats_report --llm --runs 3 --sleep 2
+
+ats-report-holdout:
+	$(PY) -m scripts.ats_report --llm --holdout --runs 3 --sleep 2
+
+writer-report:
+	$(PY) -m scripts.writer_report
+
+writer-report-llm:
+	$(PY) -m scripts.writer_report --llm --sleep 3
+
 critic-report-llm:
-	$(PY) -m scripts.critic_report --llm --sleep 60
+	$(PY) -m scripts.critic_report --llm --sleep 3
 
 run:
 	$(PY) -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000

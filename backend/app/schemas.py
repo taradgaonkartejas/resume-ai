@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 ORM = ConfigDict(from_attributes=True)
 
@@ -92,14 +92,66 @@ class ParseStatusOut(BaseModel):
 
 
 # ---------- analysis ----------
+class AtsRelabelOut(BaseModel):
+    """A section whose heading is hiding its content from a parser."""
+
+    ref: str = ""
+    current_title: str = ""
+    suggested_title: str = ""
+    reason: str = ""
+
+
+class AtsExpansionOut(BaseModel):
+    acronym: str = ""
+    expanded: str = ""
+
+
+class AtsReviewOut(BaseModel):
+    """Advisory machine-readability notes. Never affects the score."""
+
+    relabels: list[AtsRelabelOut] = Field(default_factory=list)
+    expansions: list[AtsExpansionOut] = Field(default_factory=list)
+    note: str = ""
+
+
+class CommentaryOut(BaseModel):
+    headline: str = ""
+    category_notes: dict = Field(default_factory=dict)
+
+
 class AnalysisOut(BaseModel):
+    """The analysis result as the client sees it.
+
+    `trace` is carried but excluded: it holds node names, model ids and
+    latencies, which are operator data rather than user data. What the user
+    is owed is the prose those nodes produced -- the ScoringAgent headline
+    and the ATS review -- so those are lifted out as first-class fields.
+
+    They were previously computed, persisted and then never returned by any
+    endpoint, which made the whole LLM commentary layer write-only: it cost a
+    model call per analysis and nobody could read the result.
+    """
+
     model_config = ORM
     id: uuid.UUID
     resume_id: uuid.UUID
     overall_score: int
     category_scores: dict = Field(default_factory=dict)
     role_tags: list = Field(default_factory=list)
+    trace: dict = Field(default_factory=dict, exclude=True)
     created_at: datetime
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def commentary(self) -> CommentaryOut:
+        raw = self.trace.get("commentary") or {}
+        return CommentaryOut.model_validate(raw if isinstance(raw, dict) else {})
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def ats_review(self) -> AtsReviewOut:
+        raw = self.trace.get("ats_review") or {}
+        return AtsReviewOut.model_validate(raw if isinstance(raw, dict) else {})
 
 
 # ---------- guided step editor ----------

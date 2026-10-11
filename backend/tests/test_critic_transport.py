@@ -295,3 +295,88 @@ def test_review_draft_is_review_batch_of_one():
     draft = _draft(0, "Drove Terraform adoption across 8 teams.")
     single = agents.review_draft(draft, DATA).value
     assert single == agents.review_batch([draft], DATA)[0].value
+
+
+# --------------------------------------------------------------------------
+# the critic could not see the resume
+# --------------------------------------------------------------------------
+
+#: A resume whose skills section names a technology that appears in no bullet.
+#: This is the exact shape that produced a live false rejection reading
+#: "Adds technology (Go) not present in original" -- for a resume listing Go.
+WIDER = {
+    "contact": {"name": "Jane", "email": "j@e.com", "phone": "+1 555"},
+    "summary": {"text": ""},
+    "experience": [
+        {
+            "company": "Acme", "role": "Eng", "dates": "2020-2024",
+            "title": "Eng", "start_date": "2020", "end_date": "2024",
+            "bullets": ["Built Terraform modules adopted by 8 teams."],
+        }
+    ],
+    "education": [],
+    "skills": [{"label": "Languages", "items": ["Go", "Python"]}],
+    "projects": [],
+    "certifications": [],
+}
+
+
+def test_the_critic_is_shown_the_whole_resume_not_just_the_line():
+    """A fact stated elsewhere in the resume must be visible to the critic.
+
+    It used to receive only ORIGINAL and PROPOSED. Asked whether a rewrite
+    claimed anything "the original" did not support, it had no way to know
+    that Go is listed under skills, so mentioning Go read as an invention.
+    """
+    pending = [(0, "Built Terraform modules adopted by 8 teams.",
+                {"target_ref": "exp_0.bullet_0",
+                 "original_text": "Built Terraform modules adopted by 8 teams.",
+                 "suggested_text": "Built Terraform modules in Go, adopted by 8 teams.",
+                 "keywords": ["Go"]})]
+    payload = agents._batch_payload(pending, WIDER)
+    assert "Go" in payload
+    assert "RESUME" in payload
+
+
+def test_a_composed_summary_still_shows_the_resume():
+    """The compose case: ORIGINAL is empty, so it was ALL the critic had.
+
+    Rejection was the only answer consistent with the evidence it was given.
+    """
+    pending = [(0, "", {"target_ref": "summary.text", "original_text": "",
+                        "suggested_text": "Platform engineer working in Go.",
+                        "keywords": []})]
+    payload = agents._batch_payload(pending, WIDER)
+    assert "Terraform" in payload, "the resume must be present even when ORIGINAL is empty"
+    assert "ORIGINAL:" in payload
+
+
+def test_the_payload_survives_a_missing_resume():
+    """Context-building must never be the thing that breaks a safety check."""
+    pending = [(0, "x", {"target_ref": "exp_0.bullet_0",
+                         "original_text": "x", "suggested_text": "y", "keywords": []})]
+    assert "PROPOSED: y" in agents._batch_payload(pending, None)
+    assert "PROPOSED: y" in agents._batch_payload(pending, {})
+
+
+def test_review_batch_passes_the_resume_through():
+    """The wiring, not just the helper."""
+    seen = {}
+
+    def fake(task, system, user, schema, temperature=0.0):
+        seen["user"] = user
+        raise RuntimeError("stop here; the payload is what is under test")
+
+    with patch.object(llm, "is_configured", return_value=True), \
+         patch.object(llm, "structured", side_effect=fake):
+        agents.review_batch(
+            [{"target_ref": "exp_0.bullet_0",
+              "original_text": "Built Terraform modules adopted by 8 teams.",
+              # must not itself regress, or the hard check rejects it
+              # before the LLM is ever reached -- which is the new guard
+              # doing its job, not a transport failure.
+              "suggested_text": "Built Terraform modules in Go, adopted by 8 teams.",
+              "keywords": []}],
+            WIDER,
+        )
+    assert "Go" in seen.get("user", ""), "review_batch must hand the resume on"

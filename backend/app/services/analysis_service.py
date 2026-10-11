@@ -95,6 +95,7 @@ class AnalysisService:
                     "deterministic": True,
                     "llm_used": used_llm,
                     "commentary": state.get("commentary", {}),
+                    "ats_review": state.get("ats_review", {}),
                     "graph": "analysis",
                 },
             )
@@ -104,7 +105,7 @@ class AnalysisService:
                 score_resume(data),
                 infer_role_tags(data),
                 {
-                    "nodes": ["RuleEngine", "ScoringAgent"],
+                    "nodes": ["RuleEngine", "ScoringAgent", "AtsAgent"],
                     "deterministic": True,
                     "llm_used": False,
                 },

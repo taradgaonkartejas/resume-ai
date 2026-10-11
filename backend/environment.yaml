@@ -51,6 +51,7 @@ dependencies:
       - langgraph==1.2.11
       - langchain==1.4.2
       - langchain-openai==1.6.2
+      - openai==3.24.0            # imported directly by scripts/check_model_access.py
       - langgraph-checkpoint-sqlite==3.1.1
       - langgraph-checkpoint-postgres==3.1.2
 
@@ -63,4 +64,11 @@ dependencies:
 
       # --- dev ---
       - pytest==9.1.1
+      - pytest-cov==7.1.0
+      # reportlab builds the PDF fixtures in test_parse_quality.py and
+      # test_reparse.py. It was installed but NEVER DECLARED, so the first
+      # `conda env update --prune` deleted it and both modules failed to
+      # import. An undeclared dependency is invisible until a prune, and
+      # then it is a collection error, not a test failure.
+      - reportlab==5.0.1
       - ruff==0.16.8

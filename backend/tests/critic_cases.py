@@ -20,6 +20,27 @@ engine and the LLM have very different envelopes:
             changed verb. The rule engine is blind to all of these. This is
             the entire reason an LLM critic exists.
 
+**What makes a rewrite faithful.** A rewrite is faithful iff *every claim it
+makes is entailed by the original*. Not "the numbers match", not "it reads
+better" -- entailment.
+
+That definition was adopted after two cases in this file were found to be
+mislabelled, and it was written down *before* looking at which way any model
+had voted. Applied uniformly it leaves three of the five faithful cases
+untouched -- including `tighten_wording`, where it convicts our own prompt
+rather than the model. A rule that only ever exonerated the model would not do
+that, and a corpus relabelled to match whatever the model said would measure
+nothing but itself.
+
+Two consequences worth stating, because both were got wrong once:
+
+  * Preserving the metric does not make a rewrite faithful. `keep_metric_reword`
+    keeps "8 teams" exactly and is still a fabrication, because the verb
+    changed what the person is claiming to have done.
+  * Removing hedging is safe; removing a *contribution qualifier* is not.
+    "somewhat" is a hedge. "helped to work on" is a statement about how much
+    of the work was yours.
+
 `rule_engine` records what the rule engine *currently* does, so that this file
 also pins its capability envelope. If someone improves _rule_critique, the
 pinning test fails and this column gets updated deliberately rather than
@@ -146,6 +167,41 @@ CASES: list[dict] = [
         "kind": "semantic",
         "rule_engine": "blind",
     },
+    {
+        "id": "keep_metric_reword",
+        # Relabelled. "8 teams" survives untouched, which is why this was
+        # filed as faithful -- but the metric was never the problem. Building
+        # modules that 8 teams chose to adopt does not entail causing that
+        # adoption; "drove" claims evangelism the original does not state.
+        # Kept under its original id on purpose: a case that preserves the
+        # number and is STILL a fabrication proves the critic is not merely
+        # doing arithmetic.
+        "why": "metric preserved, but 'drove adoption' is not entailed by 'built what was adopted'",
+        "original": "Built Terraform modules adopted by 8 teams.",
+        "suggested": "Drove Terraform module adoption across 8 teams.",
+        "expect": "reject",
+        "kind": "semantic",
+        "rule_engine": "blind",
+    },
+    {
+        "id": "remove_filler",
+        # Relabelled. The edit removes two different things and the old label
+        # only accounted for one: "somewhat" is a hedge (safe to drop), while
+        # "helped to work on" states how much of the work was the candidate's
+        # (not safe to drop). Helping to improve something does not entail
+        # having improved it.
+        #
+        # Rejected by five models from five families -- gemini-3.5-flash-lite,
+        # k2-horizon, glm-4.7-flash, gemma-4-26b and gpt-oss-120b -- before
+        # this label was questioned. Unanimity against a label is evidence
+        # about the label.
+        "why": "'helped to work on improving X' does not entail 'improved X'",
+        "original": "Helped to work on improving the CI system somewhat.",
+        "suggested": "Improved the CI system.",
+        "expect": "reject",
+        "kind": "semantic",
+        "rule_engine": "blind",
+    },
     # ------------------------------------------------------------ faithful
     {
         "id": "tighten_wording",
@@ -157,19 +213,23 @@ CASES: list[dict] = [
         "rule_engine": "catches",
     },
     {
-        "id": "keep_metric_reword",
-        "why": "metric preserved exactly",
-        "original": "Built Terraform modules adopted by 8 teams.",
-        "suggested": "Drove Terraform module adoption across 8 teams.",
+        "id": "remove_hedging_only",
+        # What keep/remove_filler was reaching for, with the confound removed:
+        # a hedge and nothing else. Dropping "somewhat" changes no claim.
+        "why": "dropping a hedge changes no claim about who did what",
+        "original": "Improved the CI system somewhat.",
+        "suggested": "Improved the CI system.",
         "expect": "approve",
         "kind": "faithful",
         "rule_engine": "catches",
     },
     {
-        "id": "remove_filler",
-        "why": "trimming hedging is not a claim change",
-        "original": "Helped to work on improving the CI system somewhat.",
-        "suggested": "Improved the CI system.",
+        "id": "reword_keeping_claim",
+        # The honest version of keep_metric_reword: same metric, same verb,
+        # same actor -- only the sentence shape moves.
+        "why": "same claim, same metric, only the clause order changes",
+        "original": "Built Terraform modules adopted by 8 teams.",
+        "suggested": "Built Terraform modules that 8 teams adopted.",
         "expect": "approve",
         "kind": "faithful",
         "rule_engine": "catches",

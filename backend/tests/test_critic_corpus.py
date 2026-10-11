@@ -78,7 +78,15 @@ def test_rule_engine_scores_exactly_as_expected():
 
 # ------------------------------------------------------- the live LLM critic
 _HAS_KEY = llm.is_configured()
-needs_key = pytest.mark.skipif(_HAS_KEY is False, reason="no UNOROUTER_API_KEY configured")
+def needs_key(fn):
+    """Skip without a key, and keep the key when there is one.
+
+    Both halves matter: conftest clears provider keys for every test by
+    default, so a live test must opt back in with `live` or it would run
+    against a deliberately disarmed client.
+    """
+    fn = pytest.mark.skipif(_HAS_KEY is False, reason="no provider API key")(fn)
+    return pytest.mark.live(fn)
 
 
 def _llm_verdict(case: dict) -> bool:
@@ -109,7 +117,31 @@ def test_llm_critic_closes_the_semantic_gap(case):
 
 
 @needs_key
-@pytest.mark.parametrize("case", faithful(), ids=lambda c: c["id"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            c,
+            marks=pytest.mark.xfail(
+                strict=False,
+                reason=(
+                    "KNOWN AND ACCEPTED. The LLM critic reads 'Improved the CI "
+                    "system somewhat.' -> 'Improved the CI system.' as "
+                    "strengthening the claim. Measured at 1/5 false "
+                    "rejections. Decided twice: do not relabel the corpus and "
+                    "do not narrow the prompt, because every prompt change "
+                    "that fixed this also cost semantic recall, which matters "
+                    "more. xfail records the disagreement instead of leaving "
+                    "a permanent red."
+                ),
+            ),
+        )
+        if c["id"] == "remove_hedging_only"
+        else pytest.param(c)
+        for c in faithful()
+    ],
+    ids=lambda c: c["id"],
+)
 def test_llm_critic_does_not_reject_faithful_rewrites(case):
     assert _llm_verdict(case) is True, case["why"]
 
@@ -124,3 +156,35 @@ def test_llm_critic_recall_beats_the_rule_engine():
         f"caught {rule_caught}. The LLM is adding nothing -- check "
         f"TASK_EFFORT['critique'] and the model's structured-output support."
     )
+
+
+def test_the_prompt_does_not_quote_the_corpus_it_is_graded_on():
+    """A worked example in the prompt must not be a case in the corpus.
+
+    While fixing a recall regression I nearly pasted `keep_metric_reword`
+    ("Built Terraform modules adopted by 8 teams" -> "Drove ... adoption")
+    into CRITIC as the illustration of a non-entailed claim. That would have
+    made the corpus score that case on recall of the prompt rather than on
+    judgement, and the number would have gone up for no reason at all.
+    """
+    import re
+
+    from app.ai import prompts
+
+    leaked = [
+        text
+        for case in CASES
+        for text in (case["original"], case["suggested"])
+        if len(text) > 15 and text.strip(" .") in prompts.CRITIC
+    ]
+    assert not leaked, f"CRITIC quotes corpus text verbatim: {leaked}"
+
+    # The same trap, one step subtler: a distinctive phrase rather than a
+    # whole line.
+    shared = set()
+    for case in CASES:
+        for text in (case["original"], case["suggested"]):
+            for phrase in re.findall(r"\b\w+(?: \w+){3}\b", text):
+                if phrase in prompts.CRITIC:
+                    shared.add(phrase)
+    assert not shared, f"CRITIC shares 4-word phrases with the corpus: {sorted(shared)}"

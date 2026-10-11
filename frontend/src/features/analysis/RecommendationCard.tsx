@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ArrowRight, Loader2, RefreshCw, Sparkles } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ApiError } from "@/api/client";
 import { useRewriteSection } from "@/api/queries";
 import { SuggestionCard } from "@/features/suggestions/SuggestionCard";
 import type { Finding, SuggestionOut } from "@/services";
@@ -120,20 +121,39 @@ export function RecommendationCard({
 
           {rewrite.isError && !rewrite.isPending && (
             <div className="mt-2.5" role="alert">
-              <p className="text-xs leading-relaxed text-reject-text">
+              {/* A refusal and an outage are not the same news. Only the
+                  former is the user's problem, so only the former is red. */}
+              <p
+                className={
+                  "text-xs leading-relaxed " +
+                  (rewrite.error instanceof ApiError && rewrite.error.isTransient
+                    ? "text-content-muted"
+                    : "text-reject-text")
+                }
+              >
                 {(rewrite.error as Error)?.message ??
                   "Could not draft a revision for this."}
               </p>
               <div className="mt-1.5 flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => start()}
-                  className="inline-flex items-center gap-1 text-xs font-medium
-                             text-brand-text hover:underline"
-                >
-                  <RefreshCw className="size-3" aria-hidden />
-                  Try again
-                </button>
+                {/* "Try again" only when trying again could work.
+                    rewrite_for_finding already makes two informed attempts
+                    server-side, so this button is attempt three. When the
+                    writer has declined because the missing number is one only
+                    the user knows, every one of those attempts is guaranteed
+                    to 422 -- the corpus grades that refusal as correct
+                    behaviour. Offering a retry there is an invitation to a
+                    dead end; the useful affordance is "Go to field". */}
+                {!(rewrite.error instanceof ApiError && rewrite.error.isFinalRefusal) && (
+                  <button
+                    type="button"
+                    onClick={() => start()}
+                    className="inline-flex items-center gap-1 text-xs font-medium
+                               text-brand-text hover:underline"
+                  >
+                    <RefreshCw className="size-3" aria-hidden />
+                    Try again
+                  </button>
+                )}
                 {onFix && (
                   <button
                     type="button"

@@ -8,9 +8,13 @@ from app.services import storage
 from app.services.exceptions import ResumeNotFound, UnsupportedFormat
 from app.services.resume_ops import (
     date_label,
+    education_lines,
+    experience_lines,
     extra_entry_line,
+    label_links,
     to_plain_text,
     visible_extras,
+    with_location,
 )
 
 FORMATS = {
@@ -106,6 +110,39 @@ def _hex_to_rgb(value: str) -> tuple[int, int, int] | None:
         return None
 
 
+def _add_hyperlink(paragraph, url: str, text: str) -> None:
+    """Append a real hyperlink run to a python-docx paragraph.
+
+    python-docx has no hyperlink API, so the relationship and the `w:hyperlink`
+    element are built by hand. Styling is explicit rather than via the
+    "Hyperlink" character style, which is not guaranteed to exist in a
+    document built from the default template.
+    """
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    from docx.oxml.ns import qn
+    from docx.oxml.shared import OxmlElement
+
+    r_id = paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True)
+    link = OxmlElement("w:hyperlink")
+    link.set(qn("r:id"), r_id)
+
+    run = OxmlElement("w:r")
+    props = OxmlElement("w:rPr")
+    colour = OxmlElement("w:color")
+    colour.set(qn("w:val"), "0563C1")
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    props.append(colour)
+    props.append(underline)
+    run.append(props)
+
+    node = OxmlElement("w:t")
+    node.text = text
+    run.append(node)
+    link.append(run)
+    paragraph._p.append(link)
+
+
 class ExportService:
     """Renders PDF / DOCX / TXT. Results are cached per resume version.
 
@@ -197,31 +234,44 @@ class ExportService:
         align = "C" if centred else "L"
 
         if tokens["header"] == "split" and not centred:
-            # Name (and headline) on the left, contact stacked on the right --
-            # the layout used by most printed templates. Both columns start at
-            # the same y, so the block reads as one unit.
-            top = pdf.get_y()
-            right_w = pdf.epw * 0.42
-            left_w = pdf.epw - right_w
-
+            # Name and headline left, contact details right-aligned BELOW
+            # them -- not beside them.
+            #
+            # This used to be a true two-column header: name on the left,
+            # contact stacked on the right, both starting at the same y. It
+            # looked right and extracted as this:
+            #
+            #     Jane Doe jane@example.com
+            #     +91 8208300420
+            #     Senior Engineer Pune, India
+            #
+            # A PDF text extractor reads straight across the page, so the two
+            # columns interleave -- the name fuses to the email and the job
+            # title to the city. That is the single most common ATS parse
+            # failure (~34% of field errors) landing on the one block whose
+            # corruption means a recruiter cannot make contact at all.
+            #
+            # There is no clever fix: anything genuinely side by side shares
+            # a text line. The layout stays visually distinct from "stacked"
+            # by right-aligning the detail row instead.
             pdf.set_font(font, "B", 20 if tokens["density"] == "airy" else 16)
             if accent:
                 pdf.set_text_color(*accent)
             pdf.set_x(pdf.l_margin)
-            pdf.cell(left_w, 9, _latin1(name), new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(0, 9, _latin1(name), new_x="LMARGIN", new_y="NEXT", align="L")
             pdf.set_text_color(0, 0, 0)
             if headline:
                 pdf.set_font(font, "", 11)
                 pdf.set_x(pdf.l_margin)
-                pdf.cell(left_w, 6, _latin1(headline), new_x="LMARGIN", new_y="NEXT")
-            left_bottom = pdf.get_y()
+                pdf.cell(0, 6, _latin1(headline), new_x="LMARGIN", new_y="NEXT", align="L")
 
-            pdf.set_font(font, "", 9)
-            pdf.set_y(top)
-            for line in detail_lines:
-                pdf.set_x(pdf.l_margin + left_w)
-                pdf.cell(right_w, 5, _latin1(line), new_x="LMARGIN", new_y="NEXT", align="R")
-            pdf.set_y(max(left_bottom, pdf.get_y()))
+            if detail_lines:
+                pdf.set_font(font, "", 9)
+                pdf.set_x(pdf.l_margin)
+                pdf.cell(
+                    0, 5, _latin1("  |  ".join(detail_lines)),
+                    new_x="LMARGIN", new_y="NEXT", align="R",
+                )
         else:
             pdf.set_font(font, "B", 20 if tokens["density"] == "airy" else 16)
             if accent:
@@ -240,8 +290,33 @@ class ExportService:
 
         links = [x for x in contact.get("links", []) if x]
         if links:
+            # Labels, not raw URLs, and each one a real clickable annotation.
+            # A 54-character LinkedIn URL in a contact header is noise that
+            # nobody retypes; the resume this feature was built for already
+            # writes "LinkedIn" over a hyperlink, so the export matches it.
+            #
+            # One cell per label, because fpdf2 attaches a link to a cell,
+            # not to a substring. That means laying the row out by hand:
+            # measure it, then set x so the result still honours the
+            # template's alignment.
             pdf.set_font(font, "", 9)
-            pdf.cell(0, 5, _latin1("  |  ".join(links)), new_x="LMARGIN", new_y="NEXT", align=align)
+            pairs = label_links(links)
+            sep = "  |  "
+            sep_w = pdf.get_string_width(sep)
+            widths = [pdf.get_string_width(label) for _, label in pairs]
+            total = sum(widths) + sep_w * (len(pairs) - 1)
+            if align == "C":
+                start = pdf.l_margin + (pdf.epw - total) / 2
+            elif align == "R":
+                start = pdf.l_margin + pdf.epw - total
+            else:
+                start = pdf.l_margin
+            pdf.set_x(max(pdf.l_margin, start))
+            for i, ((url, label), width) in enumerate(zip(pairs, widths, strict=True)):
+                if i:
+                    pdf.cell(sep_w, 5, _latin1(sep))
+                pdf.cell(width, 5, _latin1(label), link=url)
+            pdf.ln(5)
 
         if tokens["divider"]:
             y = pdf.get_y() + 1
@@ -255,7 +330,18 @@ class ExportService:
             pdf.set_font(font, "B", 11)
             label = title.upper() if tokens["caps"] else title
             if style == "sidebar":
-                label = f"| {label}"
+                # The bar used to be a literal "| " in the TEXT, so every
+                # heading extracted as "| Experience". Our own segmenter --
+                # and any ATS -- failed to recognise it, and the entire work
+                # history was dropped from the parsed document. A decorative
+                # rule must be drawn, never typed.
+                pdf.set_draw_color(*(accent or (0, 0, 0)))
+                pdf.set_line_width(1.2)
+                y0 = pdf.get_y() + 1.2
+                pdf.line(pdf.l_margin, y0, pdf.l_margin, y0 + 4.6)
+                pdf.set_line_width(0.2)
+                pdf.set_draw_color(0, 0, 0)
+                pdf.set_x(pdf.l_margin + 2.2)
             elif style == "boxed":
                 label = f"  {label}  "
             pdf.cell(0, 7, _latin1(label), new_x="LMARGIN", new_y="NEXT")
@@ -307,15 +393,13 @@ class ExportService:
         if data.get("experience"):
             heading("Experience")
             for entry in data["experience"]:
-                role = entry.get("role", "")
-                company = entry.get("company", "")
-                if tokens["entry"] == "inline":
-                    primary = " - ".join(x for x in (role, company) if x)
-                    entry_header(primary, "", date_label(entry))
-                else:
-                    # Role on top, company beneath -- the dominant layout in
-                    # real templates, and easier to scan by job title.
-                    entry_header(role or company, company if role else "", date_label(entry))
+                inline = tokens["entry"] == "inline"
+                # Role on top, company beneath -- the dominant layout in real
+                # templates, and easier to scan by job title. `location` was
+                # editable but rendered nowhere; experience_lines() folds it
+                # into the company so every surface shows the same thing.
+                primary, detail = experience_lines(entry, inline=inline)
+                entry_header(primary, detail, date_label(entry))
                 for bullet in entry.get("bullets", []):
                     body(f"  - {bullet}")
 
@@ -329,11 +413,8 @@ class ExportService:
         if data.get("education"):
             heading("Education")
             for entry in data["education"]:
-                entry_header(
-                    entry.get("degree") or entry.get("school", ""),
-                    entry.get("school", "") if entry.get("degree") else "",
-                    date_label(entry),
-                )
+                primary, detail = education_lines(entry)
+                entry_header(primary, detail, date_label(entry))
 
         def extras_block() -> None:
             # Reuses this template's own heading()/body(), so a new section type
@@ -345,7 +426,19 @@ class ExportService:
 
         if data.get("skills"):
             heading("Skills")
-            columns = max(1, min(int(tokens.get("skill_columns", 1) or 1), 3))
+            # Capped at TWO, not three, on measured evidence rather than
+            # taste: rendering the same resume at three columns and reading
+            # the text back produced
+            #
+            #     Languages / Python Go / Java Rust / Present / 2016 / TypeScript
+            #
+            # -- the grid opens a gutter wide enough to trip column
+            # detection, so the right-aligned entry dates get interleaved
+            # into the skills list and one skill is lost outright. Two
+            # columns round-trip cleanly on every template. A template
+            # asking for three is clamped rather than refused, so no
+            # existing template key breaks.
+            columns = max(1, min(int(tokens.get("skill_columns", 1) or 1), 2))
             for group in data["skills"]:
                 label = group.get("label", "")
                 items = [x for x in group.get("items", []) if x]
@@ -363,13 +456,29 @@ class ExportService:
 
                 # Fill down each column, as printed skill grids do: fpdf2 has
                 # no flow layout, so rows are composed explicitly.
+                #
+                # Separator is a COMMA, not "- ". A PDF text extractor reads
+                # straight across the page, so a grid comes back row-wise:
+                # with dashes that was "- Python - Go - TypeScript", which a
+                # parser tokenises as junk. With commas the very same row
+                # extracts as "Python, Go, TypeScript" -- a valid skills line.
+                # The grid still looks like a grid; only the text layer
+                # changes. Column order is lost in extraction either way, and
+                # for a skills list order carries no meaning.
                 col_w = pdf.epw / columns
                 rows = -(-len(items) // columns)  # ceil
                 for r in range(rows):
                     pdf.set_x(pdf.l_margin)
+                    row_last = max(
+                        (c for c in range(columns) if c * rows + r < len(items)),
+                        default=-1,
+                    )
                     for c in range(columns):
                         idx = c * rows + r
-                        text = f"- {items[idx]}" if idx < len(items) else ""
+                        if idx < len(items):
+                            text = items[idx] + ("," if c < row_last else "")
+                        else:
+                            text = ""
                         last = c == columns - 1
                         pdf.cell(
                             col_w,
@@ -395,6 +504,17 @@ class ExportService:
         if detail:
             document.add_paragraph(detail)
 
+        # DOCX dropped profile links completely, while the analysis awarded
+        # +2 for having them -- the one export a recruiter is most likely to
+        # open was the one that silently deleted them.
+        links = [x for x in contact.get("links", []) if x]
+        if links:
+            para = document.add_paragraph()
+            for i, (url, label) in enumerate(label_links(links)):
+                if i:
+                    para.add_run(" | ")
+                _add_hyperlink(para, url, label)
+
         summary = data.get("summary", {}).get("text", "")
         if summary:
             document.add_heading("Summary", level=1)
@@ -404,7 +524,12 @@ class ExportService:
             document.add_heading("Experience", level=1)
             for entry in data["experience"]:
                 head = " - ".join(
-                    x for x in (entry.get("company"), entry.get("role")) if x
+                    x
+                    for x in (
+                        with_location(entry.get("company", ""), entry.get("location")),
+                        entry.get("role"),
+                    )
+                    if x
                 )
                 document.add_paragraph(
                     f"{head}  {entry.get('dates','')}".strip(), style="Heading 2"
@@ -422,12 +547,13 @@ class ExportService:
         if data.get("education"):
             document.add_heading("Education", level=1)
             for entry in data["education"]:
+                _edu_primary, _edu_detail = education_lines(entry)
                 document.add_paragraph(
                     " — ".join(
                         x
                         for x in (
-                            entry.get("school"),
-                            entry.get("degree"),
+                            _edu_detail,
+                            _edu_primary,
                             date_label(entry),
                         )
                         if x

@@ -227,6 +227,12 @@ def analysis_for(r, refresh=False):
             for key, maximum, _t, _d in STEP_META
         },
         "role_tags": ["site reliability", "mid-level · 6 yrs"],
+        # The mock has no LLM, so it mirrors the SHAPE the real backend
+        # returns with no provider key: present, typed, empty. The client
+        # renders both conditionally, and "absent" and "nothing to say" must
+        # not look alike to it.
+        "commentary": {"headline": "", "category_notes": {}},
+        "ats_review": {"relabels": [], "expansions": [], "note": ""},
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     ANALYSES[r["id"]] = row
@@ -928,9 +934,34 @@ class H(BaseHTTPRequestHandler):
                 return self._send(404, {"detail": "Resume not found"})
             current = read_target_ref(r, ref)
             if current is None:
-                return self._send(422, {"detail": f"{ref}: nothing to rewrite there"})
+                return self._send(422, {
+                    "detail": f"{ref}: nothing to rewrite there",
+                    "reason": "nothing_to_rewrite"})
 
             body = json.loads(raw or b"{}")
+
+            # The real service returns 503 (not 422) when the AI writer could
+            # not be reached: a throttled upstream is not the user's fault and,
+            # unlike a 422, is worth retrying. ?simulate=unavailable exercises
+            # that path, because a mock that can only ever succeed lets the
+            # frontend's error branch rot untested.
+            # ?simulate=needs_fact is the OTHER 422: the writer ran, declined,
+            # and no retry can change the answer. The client must offer "Try
+            # again" for one of these and not the other, which it can only do
+            # by reading `reason` -- so the mock has to serve both.
+            if "simulate=needs_fact" in (self.path.split("?", 1) + [""])[1]:
+                return self._send(422, {
+                    "detail": "This one needs a fact only you have - the AI "
+                              "writer cannot add a number that is not already "
+                              "in your resume. Edit the text directly instead.",
+                    "reason": "needs_your_fact"})
+
+            if "simulate=unavailable" in (self.path.split("?", 1) + [""])[1]:
+                return self._send(503, {
+                    "detail": "The AI writer could not be reached just now, so "
+                              "this rewrite was not attempted. Nothing is wrong "
+                              "with your resume - try again in a minute."})
+
             bucket = SUGGESTIONS.setdefault(
                 f"analysis:{rid}", {"active": [], "matched": [], "rejected": []})
             existing = next(

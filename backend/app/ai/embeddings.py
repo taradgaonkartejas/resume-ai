@@ -1,9 +1,15 @@
 """Embeddings with a deterministic local fallback.
 
-The provider's embedding model reports ~74% success, so the fallback is not
-optional. The local embedding is a hashed bag-of-words: no semantic
-generalisation, only lexical overlap — but it is deterministic, offline and
-good enough to rank bullets.
+This is the default path, not a fallback: `settings.embeddings_remote` is
+False, so nothing is sent away to be embedded. Free hosted embedding models
+are unreliable (`gemini-embedding-2:free` reports 24.3% success -- this
+docstring previously said 74%, which contradicted config.py), but the
+deciding reason is dimensional: the pgvector column is Vector(384) and a
+*successful* remote call of the wrong width is what breaks the insert.
+
+The local embedding is a hashed bag-of-words: no semantic generalisation,
+only lexical overlap -- but it is deterministic, offline and good enough to
+rank bullets.
 """
 
 from __future__ import annotations

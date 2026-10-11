@@ -1,7 +1,7 @@
 # ResumeAI Backend
 
 FastAPI + SQLAlchemy 2.0, three layers: **controller → service → repository**.
-30 operations, 437 tests passing, ruff clean. Critic: 13/13 recall vs the rule engine's 5/13.
+30 operations, 484 tests passing, ruff clean. Critic corpus 20 cases, rule engine 5/15. Writer corpus 10 cases, rule engine 3/7 fixed, 0 fabrications. Both LLM scores pending re-measurement.
 
 ## Quick start
 

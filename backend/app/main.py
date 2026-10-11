@@ -24,6 +24,7 @@ from app.services.exceptions import (
     NotFoundError,
     QuotaExceeded,
     ValidationError,
+    WriterUnavailable,
 )
 
 
@@ -56,9 +57,26 @@ async def _quota(request: Request, exc: QuotaExceeded):
     return JSONResponse(status_code=429, content={"detail": str(exc)})
 
 
+@app.exception_handler(WriterUnavailable)
+async def _writer_unavailable(_request, exc: WriterUnavailable):
+    # 503 + Retry-After: unlike the 422 this replaced, it tells the client the
+    # failure is upstream, transient, and worth trying again.
+    retry = getattr(exc, "retry_after_seconds", None)
+    headers = {"Retry-After": str(int(retry))} if retry else {}
+    return JSONResponse(
+        status_code=503, content={"detail": str(exc)}, headers=headers
+    )
+
+
 @app.exception_handler(ValidationError)
 async def _validation(request: Request, exc: ValidationError):
-    return JSONResponse(status_code=422, content={"detail": str(exc)})
+    # `reason` lets the client branch on WHY, instead of pattern-matching the
+    # prose or -- as it did -- offering "Try again" for a permanent decline.
+    body: dict[str, object] = {"detail": str(exc)}
+    reason = getattr(exc, "reason", None)
+    if reason:
+        body["reason"] = reason
+    return JSONResponse(status_code=422, content=body)
 
 
 @app.exception_handler(ConflictError)

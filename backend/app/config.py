@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -22,6 +23,22 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 # setting falling back to its default with no error.
 
 
+# Values that are syntactically present but cannot be a credential. No real
+# key starts with "#", and none is a bracketed/angled placeholder.
+_PLACEHOLDER_RE = re.compile(r"^(#|<|\[|your[-_ ]|xxx+$|changeme$|todo$)", re.I)
+
+
+def is_placeholder(value: str) -> bool:
+    """True when `value` is blank or obviously not a real API key.
+
+    An unset key is free -- the provider is dropped without a network call. A
+    garbage key costs a round trip and returns 401, which reads like an
+    entitlement problem rather than the config typo it is.
+    """
+    text = str(value or "").strip()
+    return not text or bool(_PLACEHOLDER_RE.match(text))
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=BACKEND_DIR / ".env",
@@ -30,15 +47,72 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # LLM — optional; the app degrades gracefully without a key
-    unorouter_api_key: str = ""
-    unorouter_base_url: str = "https://api.unorouter.com/v1"
-    model_default: str = "gemini-3.5-flash-lite:free"
-    embedding_model: str = "gemini-embedding-2:free"
-    # When true, any model whose name does not end in ":free" is refused before
-    # a request is ever sent. UnoRouter bills per token, the default model does
-    # not have 100% uptime, and a fallback chain is exactly the code path that
-    # quietly reaches for a paid model at 3am. Opt out deliberately.
+    # LLM — optional; the app degrades gracefully without a key.
+    #
+    # One key per provider. A chain spans vendors, so holding only one of
+    # these is fine: resolve_chain() skips the models it has no key for.
+    # Base URLs live in llm.PROVIDERS, not here -- they are facts about the
+    # vendor, not things an operator should be editing.
+    nvidia_api_key: str = ""      # build.nvidia.com  — no card, ~40 req/min
+    groq_api_key: str = ""        # console.groq.com  — no card, 30 req/min
+    unorouter_api_key: str = ""   # legacy; 1 req/min/model, hence the move
+
+    # Per-task routing, qualified as "provider:model".
+    #
+    # writing/chat go to a chat-tuned model because the user reads that prose.
+    # critique goes to a DIFFERENT VENDOR on purpose: the critic exists to
+    # catch what the writer got wrong, and a model does not audit itself well.
+    #
+    # NVIDIA ids below were read from the live catalogue (82 models) on
+    # 2026-09-27, not guessed -- an earlier draft of this block invented
+    # "kimi-k2.5", "qwen/qwen3.5" and "nemotron-3-super-120b", none of which
+    # exist. Free catalogues churn, so re-check with `make models`, which
+    # flags any id that is not in the provider's catalogue.
+    # Every id below carries a "Free Endpoint" badge on build.nvidia.com or is
+    # on Groq's free list. kimi-k2.6 and glm-5.3-flash used to sit here and are
+    # NOT free endpoints -- they 404 and time out respectively on this plan.
+    model_default: str = "groq:openai/gpt-oss-120b"
+    # nemotron-3-super was retired (410) on 2026-10-03 and took five task
+    # slots with it. The writer must stay on a DIFFERENT VENDOR from the
+    # critic (groq) -- a writer graded by its own family is not an
+    # independent measurement, and there is a test that enforces it.
+    #
+    # UNVERIFIED FOR GENERATION. nemotron-3-ultra-550b-a55b answered the
+    # 2026-10-02 probe in 3.22s, but that was a 1-token ping, and this
+    # project has already been bitten twice by trusting one: lightning-30b
+    # pings in 0.33s and times out at 45s on real work.
+    #
+    # Run `make models-gen-all PROVIDER=nvidia` to measure every free NVIDIA
+    # model on a real generation, then set this to the fastest usable one.
+    # If this id is slow or dead, the chain falls through to Groq, so the
+    # app degrades rather than breaks.
+    model_writing: str = "nvidia:nvidia/nemotron-3-ultra-550b-a55b"
+    model_chat: str = "groq:openai/gpt-oss-120b"
+    model_critique: str = "groq:openai/gpt-oss-120b"
+    model_extraction: str = "groq:openai/gpt-oss-120b"
+    # NOT nemotron-3.5-lightning-30b-a3b. It pings in 0.33s -- the fastest
+    # model in the catalogue -- and then times out at 45s on a real 40-word
+    # generation. Chosen on ping latency one turn after building the tool
+    # whose entire purpose is that a ping does not predict generation.
+    model_jd_analysis: str = "groq:openai/gpt-oss-120b"
+    model_scoring: str = "groq:openai/gpt-oss-20b"
+    # The ATS agent is NOT scoring work and must not inherit the 20b model.
+    # Scoring writes prose about a number that is already decided -- low
+    # stakes, so the small model is right. The ATS agent makes the hardest
+    # judgement in the product: whether "My Journey" is a hidden work history
+    # (relabel) or "Leadership & Achievements" is genuinely custom (leave
+    # alone). Those are structurally identical and only the content tells
+    # them apart. It was briefly wired to `scoring`, which silently put the
+    # smallest model in the catalogue on the one task where being wrong
+    # makes the user hand-edit a document that was already correct.
+    model_ats: str = "groq:openai/gpt-oss-120b"
+
+    # Unused while embeddings_remote is False (see below) but kept valid so
+    # a flip of that flag does not 404.
+    embedding_model: str = "nvidia:nvidia/nemotron-3-embed-1b"
+    # When true, a model that is not free on the plan we are on is refused
+    # before a request is ever sent. A fallback chain is exactly the code path
+    # that quietly reaches for a paid model at 3am. Opt out deliberately.
     free_models_only: bool = True
     # Embeddings run locally by default, and not only to save money.
     #   1. gemini-embedding-2:free reports 24.3% success, so ~3 in 4 calls
@@ -75,7 +149,16 @@ class Settings(BaseSettings):
 
     @property
     def llm_configured(self) -> bool:
-        return bool(self.unorouter_api_key)
+        """Any provider key at all. See llm.is_configured() for the live check.
+
+        Uses is_placeholder() rather than truthiness so a leftover comment or
+        `<your-key>` does not read as a configured provider here while
+        llm.Provider.configured correctly rejects it.
+        """
+        return any(
+            not is_placeholder(k)
+            for k in (self.nvidia_api_key, self.groq_api_key, self.unorouter_api_key)
+        )
 
 
 settings = Settings()

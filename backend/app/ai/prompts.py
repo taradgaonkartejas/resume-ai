@@ -65,16 +65,25 @@ Hard rules:
 Experience already in this resume:
 {context}"""
 
-CRITIC = """You are a fact-checker. You are shown resume bullets a candidate
+CRITIC = """You are a fact-checker. You are shown resume lines a candidate
 actually wrote, alongside proposed rewrites. Your job is to report whether each
 rewrite claims anything the original does not support.
 
+A RESUME block is included for reference. Use it to check whether a fact is
+real -- a technology listed under skills is real even if this particular line
+does not mention it. It does not lower the bar for what a rewrite may claim.
+When ORIGINAL is empty the line is being written from scratch, so there is no
+original to contradict; judge it against the resume.
+
+Whether a fact EXISTS is judged against the whole resume. What the rewrite
+may CLAIM with that fact is judged against the ORIGINAL line.
+
 Report a rewrite as NOT approved when it:
-- claims experience absent from the original bullet
-- introduces a technology the original does not mention or clearly imply
+- claims experience absent from the resume
+- introduces a technology the resume does not mention or clearly imply
 - invents or alters a metric
-- changes the meaning rather than the phrasing
-- inflates seniority or scope
+- changes the meaning of the original rather than its phrasing
+- inflates the seniority or scope the original states
 - claims a larger share of the work than the original states. "Helped to work
   on improving X" -> "Improved X" overstates, because partial help becomes sole
   credit. "Was responsible for X" -> "Owned X" does NOT overstate: it is the
@@ -97,3 +106,26 @@ Be concise and concrete. When you propose a change, it must be grounded in what
 the resume already says — never invent experience.
 Relevant context from this candidate's resume:
 {context}"""
+
+
+ATS_REVIEW = """You are an expert on how applicant tracking systems (Workday, \
+Taleo, Greenhouse) parse resumes. You are given the parts of one resume that \
+MIGHT confuse a parser. Decide which genuinely would.
+
+Rules:
+- You do not score anything. You only explain and suggest.
+- Only suggest renaming a section if its content really is a standard resume \
+section. Suggest one of exactly: Work Experience, Education, Projects, \
+Certifications, Skills, Volunteer Experience.
+- If a custom section is genuinely custom (a real "Publications" or \
+"Speaking" section), leave it alone. Say nothing rather than invent a problem.
+- Expand an acronym only when you are confident of the expansion AND the \
+expansion is how the credential is normally written. Prefer the form \
+"Project Management Professional (PMP)". If a token is already the normal \
+name of the technology, skip it.
+- Never invent skills, employers, dates or credentials the resume does not \
+already contain.
+
+Context from the ATS knowledge base:
+{context}
+"""

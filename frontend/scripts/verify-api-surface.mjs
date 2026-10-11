@@ -185,7 +185,12 @@ ok(JSON.stringify(fork.structured_data) === JSON.stringify(sd), "child deep-copi
 section("analysis");
 await expectStatus(api.get(`/resumes/${blank.id}/analysis`), 404, "GET /analysis before run -> 404 (normal)");
 const an = (await api.post(`/resumes/${BASE_ID}/analyze`)).data;
-hasFields(an, ["id", "resume_id", "overall_score", "category_scores", "role_tags", "created_at"], "POST /analyze");
+hasFields(an, ["id", "resume_id", "overall_score", "category_scores", "role_tags", "commentary", "ats_review", "created_at"], "POST /analyze");
+hasFields(an.commentary, ["headline", "category_notes"], "commentary shape");
+hasFields(an.ats_review, ["relabels", "expansions", "note"], "ats_review shape");
+ok(Array.isArray(an.ats_review.relabels) && Array.isArray(an.ats_review.expansions), "ats_review lists are arrays");
+// Operator data -- node names, model ids, latencies -- stays server-side.
+ok(an.trace === undefined, "trace is not exposed to the client");
 const cats = Object.keys(an.category_scores).sort();
 ok(JSON.stringify(cats) === JSON.stringify(["contact", "experience", "format", "summary"]), "4 categories", cats.join(","));
 hasFields(an.category_scores.contact, ["score", "max", "notes"], "category shape");
@@ -194,6 +199,7 @@ ok(JSON.stringify(maxes) === JSON.stringify(["contact:15", "experience:45", "for
 ok(an.overall_score >= 0 && an.overall_score <= 100, "score in range", `${an.overall_score}`);
 const an2 = (await api.get(`/resumes/${BASE_ID}/analysis`)).data;
 ok(an2.id === an.id, "GET /analysis returns the latest");
+ok(JSON.stringify(an2.ats_review) === JSON.stringify(an.ats_review), "ats_review survives the DB round-trip");
 
 /* ------------------------------------------------------- guided steps --- */
 section("analysis/steps");
@@ -395,6 +401,26 @@ section("AI rewrite — POST /resumes/{id}/sections/{ref}/rewrite");
     { finding_id: "experience.weak_verbs", regenerate: true },
   )).data;
   ok(regen.id !== first.id, "regenerate supersedes the previous draft");
+
+  // A writer that was never reached must not produce a verdict about the
+  // resume. 503 (upstream, transient, retryable) vs 422 ("your request cannot
+  // be processed") -- conflating them once told a user their resume needed a
+  // number they did not have, when the model had simply been rate-limited.
+  await expectStatus(
+    api.post(`/resumes/${rw.id}/sections/${REF}/rewrite?simulate=unavailable`, {}),
+    503,
+    "unreachable writer -> 503, not 422",
+  );
+  try {
+    await api.post(`/resumes/${rw.id}/sections/${REF}/rewrite?simulate=unavailable`, {});
+    ok(false, "503 detail names the transport failure");
+  } catch (e) {
+    const detail = String(e.response?.data?.detail ?? "");
+    ok(/could not be reached/i.test(detail),
+       "503 detail names the transport failure", detail.slice(0, 60));
+    ok(!/fact only you have/i.test(detail),
+       "503 is not phrased as a verdict about the resume");
+  }
 
   await expectStatus(
     api.post(`/resumes/${rw.id}/sections/experience/rewrite`, {}),

@@ -124,8 +124,13 @@ def test_analysis_graph_visits_every_node():
     assert [s["node"] for s in state["trace"]] == [
         "RuleEngine",
         "ScoringAgent",
+        "AtsAgent",
     ]
     assert state["commentary"]["headline"]
+    # AtsAgent always reports, even when it has nothing to say and so never
+    # called a model. A silent node and a skipped node must not look alike in
+    # the trace.
+    assert "ats_review" in state
 
 
 # ---------------------------------------------------------------- tailor graph

@@ -50,11 +50,72 @@ export function AnalysisStepper({
     [flush],
   );
 
-  const onFix = useCallback((finding: Finding) => {
-    setFocusRef(finding.target_ref);
-    const el = document.getElementById(`f-${finding.target_ref}`);
-    el?.scrollIntoView({ behavior: "smooth", block: "center" });
-  }, []);
+  /** "Go to field" -- take the user to the input the finding is about.
+   *
+   *  This button did nothing for most findings, and did it silently. Two
+   *  causes, both worth naming:
+   *
+   *  1. Only the ACTIVE step is mounted. A finding listed on the summary step
+   *     that points at `contact.email` had no element to find, because the
+   *     contact step was not rendered. The lookup returned null, `el?.` 
+   *     swallowed it, and the click looked like a no-op. So: find the step
+   *     that owns the ref, switch to it, and scroll on the NEXT frame, once
+   *     React has mounted the new step.
+   *  2. `contact.links.missing` fires precisely when there are no links, and
+   *     the links fieldset renders one row per link -- zero rows, nothing to
+   *     focus. Landing on the empty fieldset is not help. `onSeed` adds the
+   *     blank row first so there is a cursor to put somewhere.
+   */
+  /** Add the empty link row that `contact.links.missing` is complaining
+   *  about, so "Go to field" has somewhere to put the cursor. */
+  const onSeedLink = useCallback(() => {
+    if (!draft) return;
+    update({
+      ...draft,
+      contact: { ...draft.contact, links: [...(draft.contact.links ?? []), ""] },
+    });
+  }, [draft, update]);
+
+  const onFix = useCallback(
+    (finding: Finding) => {
+      const ref = finding.target_ref;
+      setFocusRef(ref);
+
+      const owner = steps?.steps.findIndex((st) =>
+        st.findings.some((f) => f.target_ref === ref),
+      );
+      const target = owner !== undefined && owner >= 0 ? owner : active;
+      if (target !== null && target !== active) {
+        flush();
+        setActive(target);
+      }
+
+      if (ref === "contact.links" && (draft?.contact?.links?.length ?? 0) === 0) {
+        onSeedLink();
+      }
+
+      // Two frames: one for the step swap to commit, one for any row the
+      // seed above just added.
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          const el = document.getElementById(`f-${ref}`);
+          if (!el) {
+            // Never fail silently again. A navigation affordance that cannot
+            // find its target is a bug, and the console is where it belongs.
+            console.warn(`[AnalysisStepper] no element for target_ref "${ref}"`);
+            return;
+          }
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          const field =
+            el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+              ? el
+              : el.querySelector<HTMLElement>("input, textarea");
+          field?.focus({ preventScroll: true });
+        }),
+      );
+    },
+    [steps, active, draft, flush, onSeedLink],
+  );
 
   // Arrow-key navigation between steps, but never while the user is typing.
   useEffect(() => {

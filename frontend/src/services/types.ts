@@ -294,12 +294,49 @@ export type CategoryKey = "contact" | "summary" | "experience" | "format";
  */
 export type StepKey = CategoryKey | "extras";
 
+/** A section heading that is hiding its content from a parser. */
+export interface AtsRelabel {
+  ref: string;
+  current_title: string;
+  /** Empty when no model was available to judge — render nothing. */
+  suggested_title: string;
+  reason: string;
+}
+
+export interface AtsExpansion {
+  acronym: string;
+  /** Always carries both forms: "Project Management Professional (PMP)". */
+  expanded: string;
+}
+
+/**
+ * Advisory machine-readability notes from AtsAgent.
+ *
+ * Never affects overall_score — the number stays deterministic. All three
+ * fields are always present and may all be empty: the agent is gated (a tidy
+ * resume asks nothing of a model) and goes silent without a provider key.
+ * Treat "empty" as normal, not as an error.
+ */
+export interface AtsReview {
+  relabels: AtsRelabel[];
+  expansions: AtsExpansion[];
+  note: string;
+}
+
+/** Prose from ScoringAgent. The number is never the LLM's to decide. */
+export interface Commentary {
+  headline: string;
+  category_notes: Record<string, string>;
+}
+
 export interface AnalysisOut {
   id: string;
   resume_id: string;
   overall_score: number;
   category_scores: Record<CategoryKey, CategoryScore>;
   role_tags: string[];
+  commentary: Commentary;
+  ats_review: AtsReview;
   created_at: string;
 }
 
@@ -447,6 +484,10 @@ export function emptyResume(): StructuredData {
     projects: [],
     education: [],
     skills: [],
+    // Added when extras became a scored-but-optional fifth step. It was
+    // missed here, and because this helper is the preview's fallback, the
+    // omission broke `tsc -b` -- i.e. `npm run build`, not just the editor.
+    extras: [],
   };
 }
 

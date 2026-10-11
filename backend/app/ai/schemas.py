@@ -120,6 +120,56 @@ class CriticBatch(BaseModel):
         return cls(verdicts=verdicts)
 
 
+
+class SectionRelabel(BaseModel):
+    ref: str = ""
+    current_title: str = ""
+    suggested_title: str = ""
+    reason: str = ""
+
+
+class SkillExpansion(BaseModel):
+    acronym: str = ""
+    expanded: str = ""
+
+
+class AtsReview(BaseModel):
+    """Judgement calls about machine-readability. Never a score.
+
+    Carries `from_prose()` deliberately. The salvage ladder's third rung only
+    exists for schemas that opt in, and the writer path has no reader -- so a
+    model that answers correctly but in markdown is thrown away there. This
+    path is advisory and low-stakes, which makes a lenient reader clearly
+    worth having: the worst case for a misread is one unhelpful tip.
+    """
+
+    relabels: list[SectionRelabel] = Field(default_factory=list)
+    expansions: list[SkillExpansion] = Field(default_factory=list)
+    note: str = ""
+
+    @classmethod
+    def from_prose(cls, text: str) -> AtsReview | None:
+        """Read `Experience` / `PMP = Project Management Professional` lines."""
+        flat = (text or "").strip()
+        if not flat:
+            return None
+        expansions: list[SkillExpansion] = []
+        for line in flat.splitlines():
+            line = line.strip().lstrip("-*0123456789. ").strip()
+            for sep in ("=", "->", "—", ":"):
+                if sep in line:
+                    left, right = line.split(sep, 1)
+                    left, right = left.strip(), right.strip()
+                    if left.isupper() and 1 < len(left) <= 6 and 2 < len(right) < 80:
+                        expansions.append(
+                            SkillExpansion(acronym=left, expanded=right)
+                        )
+                    break
+        if not expansions:
+            return None
+        return cls(expansions=expansions, note="")
+
+
 class ChatReply(BaseModel):
     message: str = Field(description="Reply shown to the user")
     proposes_change: bool = Field(default=False)

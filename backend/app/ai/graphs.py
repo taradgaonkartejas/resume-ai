@@ -127,6 +127,7 @@ class AnalysisState(TypedDict, total=False):
     rule_result: dict
     role_tags: list
     commentary: dict
+    ats_review: dict
     trace: Annotated[list, operator.add]
 
 
@@ -163,6 +164,21 @@ def _make_analysis_graph(store: VectorStore | None):
             ],
         }
 
+    def ats_agent(state: AnalysisState) -> AnalysisState:
+        outcome = agents.review_ats(state.get("structured_data") or {}, store)
+        return {
+            "ats_review": outcome.value,
+            "trace": [
+                {
+                    "node": "AtsAgent",
+                    "agent": outcome.agent,
+                    "model": outcome.model,
+                    "used_llm": outcome.used_llm,
+                    "latency_ms": outcome.latency_ms,
+                }
+            ],
+        }
+
     builder = StateGraph(AnalysisState)
     # RetrieveATS used to sit in front of RuleEngine. It ran a generic
     # "resume quality ats rules" search into state["ats_context"], which nothing
@@ -171,9 +187,16 @@ def _make_analysis_graph(store: VectorStore | None):
     # Analyze click for an identical result.
     builder.add_node("RuleEngine", rule_engine)
     builder.add_node("ScoringAgent", scoring_agent)
+    # AtsAgent answers the machine-readability questions rules cannot, and is
+    # self-gating: with no mislabelled section and no bare acronym it returns
+    # an empty review without calling a model, which is the common case. It
+    # runs last because it must never influence the number -- by the time it
+    # executes, `rule_result` is already final.
+    builder.add_node("AtsAgent", ats_agent)
     builder.add_edge(START, "RuleEngine")
     builder.add_edge("RuleEngine", "ScoringAgent")
-    builder.add_edge("ScoringAgent", END)
+    builder.add_edge("ScoringAgent", "AtsAgent")
+    builder.add_edge("AtsAgent", END)
     return builder.compile()
 
 
@@ -194,9 +217,29 @@ class TailorState(TypedDict, total=False):
     drafts: list
     approved: list
     rejected: list
+    carried_approved: list
     decision: str
     revision_round: int
     trace: Annotated[list, operator.add]
+
+
+def should_revise(
+    rejected: list, revision_round: int, max_revisions: int
+) -> bool:
+    """Whether a critic round should be followed by another writing round.
+
+    Lifted out of the graph closure so the policy can be tested without
+    building a graph and driving it through a checkpointer. It had never been
+    tested at all, and it was wrong:
+
+        if not approved and rejected and rounds < max_revisions
+
+    `not approved` meant a round with two approved and four rejected never
+    revised. Those four rejections were dropped in silence -- the user saw
+    fewer suggestions and nothing anywhere said why. Only the all-or-nothing
+    case retried, which is the rarest one.
+    """
+    return bool(rejected) and revision_round < max_revisions
 
 
 def _make_tailor_graph(store: VectorStore | None, max_revisions: int):
@@ -238,15 +281,23 @@ def _make_tailor_graph(store: VectorStore | None, max_revisions: int):
         gaps = list(state.get("match", {}).get("gap_keywords", []))
         user_id = state.get("user_id")
         resume_id = state.get("resume_id")
+        rejections = list(state.get("rejected") or [])
+        # Drafts the critic already approved must survive the revision round.
+        # Without this, retrying a round with 2 approved and 4 rejected would
+        # throw the 2 good ones away -- which is part of why retrying was
+        # limited to the all-rejected case.
+        carried = list(state.get("approved") or [])
         outcome = agents.write_suggestions(
             data,
             gaps,
             user_id=uuid.UUID(user_id) if user_id else None,
             resume_id=uuid.UUID(resume_id) if resume_id else None,
             store=store,
+            rejections=rejections or None,
         )
         return {
             "drafts": outcome.value,
+            "carried_approved": carried,
             "trace": [
                 {
                     "node": "GenerateSuggestions",
@@ -261,7 +312,7 @@ def _make_tailor_graph(store: VectorStore | None, max_revisions: int):
 
     def critic_review(state: TailorState) -> TailorState:
         data = state.get("structured_data") or {}
-        approved: list = []
+        approved: list = list(state.get("carried_approved") or [])
         rejected: list = []
         degraded = 0
         used_llm = False
@@ -316,11 +367,20 @@ def _make_tailor_graph(store: VectorStore | None, max_revisions: int):
         }
 
     def route_after_critic(state: TailorState) -> str:
-        """Revise only if everything was rejected and we have budget left."""
-        approved = state.get("approved") or []
+        """Revise if ANY draft was rejected and there is budget left.
+
+        The gate used to be `not approved and rejected`: a round with two
+        approved and four rejected never revised, so those four rejections
+        were discarded in silence and the user simply saw fewer suggestions.
+        Nothing recorded that four rewrites had been thrown away.
+
+        Retrying is only worth doing because the critic's notes now go back
+        to the writer (see write_suggestions(rejections=...)) and the already
+        approved drafts are carried forward rather than regenerated.
+        """
         rejected = state.get("rejected") or []
         rounds = state.get("revision_round", 0)
-        if not approved and rejected and rounds < max_revisions:
+        if should_revise(rejected, rounds, max_revisions):
             return "GenerateSuggestions"
         return "AwaitUserReview"
 

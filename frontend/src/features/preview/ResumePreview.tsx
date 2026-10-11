@@ -5,6 +5,8 @@ import {
   type StructuredData,
 } from "@/services";
 import { dateLabel } from "@/lib/dates";
+import { educationLines, experienceLines } from "@/lib/entries";
+import { hrefFor, labelLinks } from "@/lib/links";
 import { cn } from "cn";
 
 /**
@@ -151,6 +153,35 @@ function Entry({
   );
 }
 
+/**
+ * Profile links as labels, not URLs, and actually clickable.
+ *
+ * Both call sites previously rendered `links.join("  ·  ")` — raw URLs, inert
+ * text. The resume this was built for writes "LinkedIn" over a hyperlink, and
+ * the preview exists to show what the export will look like, so it has to
+ * agree with the PDF and DOCX renderers.
+ */
+function ProfileLinks({ links }: { links: string[] }) {
+  return (
+    <>
+      {labelLinks(links.filter(Boolean)).map(({ url, label }, i) => (
+        <span key={url + i}>
+          {i > 0 && "  ·  "}
+          <a
+            href={hrefFor(url)}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={url}
+            className="underline decoration-dotted underline-offset-2"
+          >
+            {label}
+          </a>
+        </span>
+      ))}
+    </>
+  );
+}
+
 export function ResumePreview({
   data,
   tokens: tokensProp,
@@ -230,7 +261,7 @@ export function ResumePreview({
                   )}
                   {contact.links.length > 0 && (
                     <p className="mt-0.5 text-[9px] text-paper-muted">
-                      {contact.links.join("  ·  ")}
+                      <ProfileLinks links={contact.links} />
                     </p>
                   )}
                 </div>
@@ -263,7 +294,7 @@ export function ResumePreview({
                 )}
                 {contact.links.length > 0 && (
                   <p className="mt-0.5 text-[9px] text-paper-muted">
-                    {contact.links.join("  ·  ")}
+                    <ProfileLinks links={contact.links} />
                   </p>
                 )}
               </header>
@@ -283,13 +314,9 @@ export function ResumePreview({
                   <div key={i} className={i > 0 ? "mt-2" : undefined}>
                     <Entry
                       dates={dateLabel(job)}
-                      primary={
-                        tokens.entry === "inline"
-                          ? [job.role, job.company].filter(Boolean).join(" · ")
-                          : job.role || job.company
-                      }
+                      primary={experienceLines(job, tokens.entry === "inline")[0]}
                       secondary={
-                        tokens.entry === "inline" ? undefined : job.role ? job.company : undefined
+                        experienceLines(job, tokens.entry === "inline")[1] || undefined
                       }
                     />
                     <ul className="mt-0.5 list-disc space-y-0.5 pl-3.5">
@@ -328,8 +355,8 @@ export function ResumePreview({
                   <div key={i} className={i > 0 ? "mt-1.5" : undefined}>
                     <Entry
                       dates={dateLabel(e)}
-                      primary={e.degree || e.school}
-                      secondary={e.degree ? e.school : undefined}
+                      primary={educationLines(e)[0]}
+                      secondary={educationLines(e)[1] || undefined}
                     />
                   </div>
                 ))}
