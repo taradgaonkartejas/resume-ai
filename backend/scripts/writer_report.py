@@ -159,6 +159,31 @@ def _evaluate_inner(case: dict) -> dict:
     return result
 
 
+# ---------------------------------------------------------------- thresholds
+#
+# Pre-registered, with the granularity written down -- because a threshold a
+# metric cannot express is a different gate than the one you think you set.
+# There are 7 fixable cases, so the only reachable rates are k/7:
+#
+#   0%  14.3%  28.6%  42.9%  57.1%  71.4%  85.7%  100%
+#
+# 0.70 therefore means "at least 5 of 7". It is NOT a 70% bar.
+#
+# Why a floor is needed at all: before this, a writer that declined every
+# single case scored `resisted inventing 3/3`, `FABRICATIONS 0` and exited 0.
+# Silence passed a zero-fabrication bar trivially -- the identical vacuity
+# hole already found and closed in ats_report.py with MIN_CORRECT_RATE. A
+# test that cannot fail is worse than no test.
+#
+# The floor catches regression, it does not demand perfection: one flaky
+# case must not turn a working writer red. Measured points for calibration:
+#   codecraft:claude-sonnet-5          7/7   (2026-10-11, clean single-model)
+#   codecraft:claude-sonnet-5          6/7   (earlier, length bug present)
+#   nvidia:nemotron-3-ultra-550b       4/7   (fallback, visibly weaker)
+MIN_FIX_RATE = 0.70          # >= 5/7
+MIN_REACHES_USER = 0.70      # >= 5/7; a fix the critic blocks helps nobody
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--llm", action="store_true")
@@ -335,6 +360,32 @@ def main() -> int:
         print("  would appear in the user's resume. This outranks the fix rate:")
         print("  a writer that fixes everything by making facts up is worse than")
         print("  one that fixes nothing. Both layers failed on the same draft.")
+        return 2
+    # Floors are checked AFTER the fabrication gates on purpose: a writer
+    # that fixes everything by inventing facts is worse than one that fixes
+    # nothing, so `escaped` must outrank a good fix rate.
+    #
+    # LLM MODE ONLY. The offline rule writer fixes exactly 2 of 7 by design
+    # -- it is a deterministic fallback, not a writer -- and `make
+    # writer-report` exists to pin that number, so applying an LLM floor to
+    # it would fail the build on correct behaviour. Caught by running it:
+    # the first version of this gate turned the offline report red.
+    n_fixable = len(to_fix())
+    fix_rate = fixed_ok / n_fixable if n_fixable else 0.0
+    reach_rate = shipped_ok / n_fixable if n_fixable else 0.0
+    if args.llm and fix_rate < MIN_FIX_RATE:
+        print(f"\n  FAIL: fix rate {fixed_ok}/{n_fixable} is below the floor of "
+              f"{MIN_FIX_RATE:.0%} ({round(MIN_FIX_RATE * n_fixable)}/{n_fixable}).")
+        print("  Zero fabrications is not an achievement on its own -- a writer")
+        print("  that declines everything scores perfectly on every safety")
+        print("  metric and is useless. This floor is what stops silence from")
+        print("  passing.")
+        return 2
+    if args.llm and reach_rate < MIN_REACHES_USER:
+        print(f"\n  FAIL: only {shipped_ok}/{n_fixable} fixes actually reached "
+              f"the user, below the {MIN_REACHES_USER:.0%} floor.")
+        print("  The critic is rejecting good rewrites. A fix the user never")
+        print("  sees is a 422 to them, not a fix.")
         return 2
     if contained:
         print(f"\n  WARN: the writer invented a number in {contained} draft(s),")

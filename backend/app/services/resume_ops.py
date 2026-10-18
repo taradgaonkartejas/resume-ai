@@ -8,12 +8,32 @@ Supported forms:
 """
 
 import copy
+import json
 import re
 
 from app.services.exceptions import InvalidTargetRef
 
 _EXP_RE = re.compile(r"^(exp|prj)_(\d+)\.bullet_(\d+)$")
 _SKILLS_RE = re.compile(r"^skills\.(\d+)\.items$")
+_EDU_RE = re.compile(r"^edu_(\d+)\.([a-z_]+)$")
+
+#: Education fields a suggestion may address.
+#:
+#: Every one of these is rendered by `education_lines`, so a patch is always
+#: visible -- addressing a field the output silently drops would let a user
+#: accept a change that never appears anywhere.
+#:
+#: `dates`, `start_date`, `end_date` and `current` are deliberately absent.
+#: Education dates are stored twice (a display string and a structured pair)
+#: and patching one without the other desynchronises them; dates are also a
+#: fact rather than prose, so there is nothing for a writer to improve.
+#:
+#: Note what this does NOT do: nothing generates education suggestions yet.
+#: The blocker named in the plan was that such a suggestion could not be
+#: persisted, accepted or undone, and that is what this fixes. Pointing the
+#: tailor writer at education is a separate decision -- "add Kubernetes to
+#: your degree" is keyword stuffing, and a degree is a credential.
+_EDU_FIELDS = ("school", "degree", "field_of_study", "location", "grade")
 
 _SECTION_KEYS = {"exp": "experience", "prj": "projects"}
 
@@ -361,6 +381,19 @@ def resolve(data: dict, target_ref: str) -> str:
             raise InvalidTargetRef(f"{target_ref}: no such skill group")
         return ", ".join(groups[idx].get("items", []))
 
+    match = _EDU_RE.match(target_ref)
+    if match:
+        idx, field = int(match.group(1)), match.group(2)
+        if field not in _EDU_FIELDS:
+            raise InvalidTargetRef(
+                f"{target_ref}: education field must be one of "
+                f"{', '.join(_EDU_FIELDS)}"
+            )
+        entries = data.get("education", [])
+        if idx >= len(entries):
+            raise InvalidTargetRef(f"{target_ref}: no such education entry")
+        return str(entries[idx].get(field, "") or "")
+
     raise InvalidTargetRef(f"Unrecognised target_ref: {target_ref}")
 
 
@@ -403,7 +436,168 @@ def apply_patch(data: dict, target_ref: str, new_text: str) -> dict:
         groups[idx]["items"] = [s.strip() for s in new_text.split(",") if s.strip()]
         return patched
 
+    match = _EDU_RE.match(target_ref)
+    if match:
+        idx, field = int(match.group(1)), match.group(2)
+        if field not in _EDU_FIELDS:
+            raise InvalidTargetRef(
+                f"{target_ref}: education field must be one of "
+                f"{', '.join(_EDU_FIELDS)}"
+            )
+        entries = patched.get("education", [])
+        if idx >= len(entries):
+            raise InvalidTargetRef(f"{target_ref}: no such education entry")
+        entries[idx][field] = new_text.strip()
+        return patched
+
     raise InvalidTargetRef(f"Unrecognised target_ref: {target_ref}")
+
+
+def experience_sort_key(entry: dict) -> tuple[int, int]:
+    """(year, month) of the end date; "Present" sorts newest.
+
+    Public and living here so that the check which *grades* ordering
+    (ats.out_of_order_experience) and the operation which *fixes* it
+    (reorder_experience) are driven by one definition. Two orderings that
+    drift apart is a bug class this repo has already hit twice.
+    """
+    if entry.get("current"):
+        return (9999, 12)
+    value = (entry.get("end_date") or entry.get("start_date") or "").strip()
+    year = re.search(r"(19|20)\d{2}", value)
+    if not year:
+        return (0, 0)
+    month = re.match(
+        r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)", value, re.IGNORECASE
+    )
+    months = ["jan", "feb", "mar", "apr", "may", "jun",
+              "jul", "aug", "sep", "oct", "nov", "dec"]
+    m = months.index(month.group(1).lower()) + 1 if month else 0
+    return (int(year.group(0)), m)
+
+
+REORDERABLE_SECTIONS = ("experience",)
+
+
+def reorder_experience(data: dict) -> dict:
+    """Return a copy of ``data`` with experience sorted newest-first.
+
+    This is the fix for ``ats.not_reverse_chronological``, which the rule
+    engine has always been able to *detect* and never able to *resolve* --
+    the finding told the user to reorder their roles and then offered them
+    no control that could do it.
+
+    The ordering deliberately reuses ``ats._sort_key``, the very function
+    ``ats.out_of_order_experience`` grades with. Writing a second ordering
+    here would be the bug class this repo has already hit twice (REVISER's
+    word limit disagreeing with ``summary.too_short``; COMPOSER's bound with
+    no floor): guidance that contradicts the rule it is scored against. One
+    key, one meaning.
+
+    Undated entries sort last and keep their relative order, because
+    ``_sort_key`` returns ``(0, 0)`` for them and the sort is stable. An
+    entry with no date has no position in a chronology, and the bottom is
+    the conventional answer -- but note this *does* move it, which is
+    visible to the user and is why the operation is explicit rather than
+    something autosave does behind their back.
+    """
+    patched = copy.deepcopy(data)
+    entries = patched.get("experience") or []
+    patched["experience"] = sorted(entries, key=experience_sort_key, reverse=True)
+    _assert_permutation(entries, patched["experience"])
+    return patched
+
+
+def _assert_permutation(before: list, after: list) -> None:
+    """Guarantee a reorder only permutes -- never adds, drops or edits.
+
+    A rewrite can fabricate, which is why ``_hard_check`` and a measured
+    writer corpus exist. A reorder cannot, *provided* this holds. It is a
+    cheap total check rather than a heuristic, and it lives in the service
+    rather than in a prompt so that it stays true no matter what chooses
+    the order later -- a rule, a model, or a user's drag.
+    """
+    def canonical(items: list) -> list[str]:
+        return sorted(json.dumps(i, sort_keys=True, default=str) for i in items)
+
+    if canonical(before) != canonical(after):
+        raise RuntimeError(
+            "reorder changed content, not just order -- refusing to save"
+        )
+
+
+def placement_for(data: dict, target_ref: str) -> str:
+    """The human label for whatever ``target_ref`` currently points at.
+
+    "Acme — Senior SRE" for an experience bullet, "Summary" for the summary.
+    Returns "" for a ref with no meaningful placement, or one that does not
+    resolve.
+
+    This exists so staleness can be judged on IDENTITY rather than text.
+    `_is_stale` compares the suggestion's `original_text` against the text at
+    its ref, which misses the case where two roles carry a byte-identical
+    bullet: reorder them and the comparison still succeeds while the ref now
+    addresses a different job. The placement is what actually changed.
+    """
+    if target_ref == "summary.text":
+        return "Summary" if data.get("summary", {}).get("text") else ""
+
+    match = _EXP_RE.match(target_ref)
+    if match:
+        prefix, idx = match.group(1), int(match.group(2))
+        section = data.get(_SECTION_KEYS[prefix], [])
+        if idx >= len(section):
+            return ""
+        entry = section[idx]
+        company = entry.get("company") or entry.get("name", "")
+        role = entry.get("role", "")
+        # Same join as iter_bullets, which is what wrote the stored value.
+        # Two spellings of one label would make every suggestion look stale.
+        return " — ".join(x for x in (company, role) if x)
+
+    match = _EDU_RE.match(target_ref)
+    if match:
+        idx = int(match.group(1))
+        entries = data.get("education", [])
+        if idx >= len(entries):
+            return ""
+        return " — ".join(
+            x for x in (entries[idx].get("school", ""), entries[idx].get("degree", ""))
+            if x
+        )
+
+    match = _SKILLS_RE.match(target_ref)
+    if match:
+        idx = int(match.group(1))
+        groups = data.get("skills", [])
+        if idx >= len(groups):
+            return ""
+        return str(groups[idx].get("label", "") or "")
+
+    return ""
+
+
+def placements_in_section(data: dict, target_ref: str) -> list[str]:
+    """Every placement label in the section ``target_ref`` belongs to.
+
+    Used to decide whether a stored placement is recognisably a placement at
+    all. Analysis-origin suggestions historically stored the finding message
+    in that column, and treating one of those as an identity anchor would
+    mark perfectly good suggestions stale.
+    """
+    out: list[str] = []
+    match = _EXP_RE.match(target_ref)
+    if match:
+        prefix = match.group(1)
+        for i in range(len(data.get(_SECTION_KEYS[prefix], []))):
+            out.append(placement_for(data, f"{prefix}_{i}.bullet_0"))
+    elif _EDU_RE.match(target_ref):
+        for i in range(len(data.get("education", []))):
+            out.append(placement_for(data, f"edu_{i}.school"))
+    elif _SKILLS_RE.match(target_ref):
+        for i in range(len(data.get("skills", []))):
+            out.append(placement_for(data, f"skills.{i}.items"))
+    return [x for x in out if x]
 
 
 def iter_bullets(data: dict):

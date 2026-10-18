@@ -16,10 +16,10 @@ import { systemService } from "@/services";
 /**
  * Collects the job description, then starts a tailoring session.
  *
- * Tailoring FORKS server-side, so the session comes back pointing at a NEW
- * resume. onStarted receives that child's id — the caller must navigate to
- * it, otherwise the user keeps editing the untouched base and wonders why
- * nothing changed.
+ * Tailoring edits in place, so the session normally comes back pointing at
+ * the same resume. onStarted still receives the id off the session rather
+ * than the one passed in, because `fork: true` would make them differ —
+ * trusting the response is what keeps both modes correct.
  */
 export function TailorModal({
   open,

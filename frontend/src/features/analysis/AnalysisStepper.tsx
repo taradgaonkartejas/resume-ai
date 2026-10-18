@@ -7,9 +7,18 @@ import { Badge } from "@/components/ui/badge";
 import { ScoreRing } from "@/features/analysis/ScoreRing";
 import { RecommendationCard } from "./RecommendationCard";
 import { StepSections } from "./StepSections";
+import { CommentaryBlock } from "./CommentaryBlock";
+import { GroupedFindings } from "./GroupedFindings";
+import { FormatStepPanel } from "./FormatStepPanel";
+import { CategoryStrengths } from "./CategoryStrengths";
 import { useAutosave } from "./useAutosave";
 import { useAnalysisSteps, useResume } from "@/api/queries";
-import { rankFindings, type AnalysisStep, type Finding } from "@/services";
+import {
+  rankFindings,
+  type AnalysisStep,
+  type Finding,
+  type SuggestionOut,
+} from "@/services";
 import { cn } from "cn";
 
 /**
@@ -76,6 +85,39 @@ export function AnalysisStepper({
     });
   }, [draft, update]);
 
+  /**
+   * Findings resolved by accepting an AI draft during THIS session.
+   *
+   * The server has no concept of a fixed finding -- fixing it makes it
+   * absent from the next /analysis/steps response, so the card would
+   * simply vanish mid-interaction with no confirmation that the thing the
+   * user just clicked did anything. We keep the finding ourselves and
+   * re-render it as a green acknowledgement. Deliberately session-only:
+   * it is a congratulation, not state, and a refresh should clear it.
+   */
+  // Drafts the Step-4 bulk action created, keyed finding+ref, so the cards
+  // above can show them. Session-only: they are real Suggestions on the
+  // server, this map is just how the cards learn they exist.
+  const [bulkDrafts, setBulkDrafts] = useState<Record<string, SuggestionOut>>({});
+
+  const [fixedFindings, setFixedFindings] = useState<
+    { stepId: string; finding: Finding }[]
+  >([]);
+  // The step id is captured here rather than derived from target_ref later:
+  // "exp_0.bullets" -> experience is a guess, and the caller already knows
+  // the answer for certain.
+  const onFixed = useCallback((stepId: string, finding: Finding) => {
+    setFixedFindings((prev) =>
+      prev.some(
+        (e) =>
+          e.finding.id === finding.id &&
+          e.finding.target_ref === finding.target_ref,
+      )
+        ? prev
+        : [...prev, { stepId, finding }],
+    );
+  }, []);
+
   const onFix = useCallback(
     (finding: Finding) => {
       const ref = finding.target_ref;
@@ -140,11 +182,31 @@ export function AnalysisStepper({
 
   const step = active === null ? null : steps.steps[active];
 
+  // Only findings the server has since dropped. If a rewrite was accepted
+  // but the finding is still reported -- a partial fix, or an accept that
+  // did not move the needle -- the live card stays and we claim nothing.
+  const stepFixed =
+    step === null
+      ? []
+      : fixedFindings
+          .filter(
+            (e) =>
+              e.stepId === step.id &&
+              !step.findings.some(
+                (f) =>
+                  f.id === e.finding.id &&
+                  f.target_ref === e.finding.target_ref,
+              ),
+          )
+          .map((e) => e.finding);
+
   return (
     <div className="space-y-4">
       {step === null ? (
         <SectionList steps={steps.steps} total={steps.overall_score}
                      available={steps.points_available} onOpen={goTo}
+                     headline={steps.commentary?.headline ?? ""}
+                     headlineStale={steps.commentary_stale}
                      onExit={onExit} />
       ) : (
         <>
@@ -158,7 +220,21 @@ export function AnalysisStepper({
             onBack={() => goTo(null)}
           />
 
-          {step.findings.length > 0 && (
+          {/* The per-category prose we have been generating and discarding.
+              "SECTION ANALYSIS" on the experience step, "Overall Assessment"
+              everywhere else -- same data, named for what it describes. */}
+          <CommentaryBlock
+            text={steps.commentary?.category_notes?.[step.id] ?? ""}
+            stale={steps.commentary_stale}
+            label={step.id === "experience" ? "Section analysis" : "Overall Assessment"}
+          />
+
+          {/* Between the assessment and the recommendations, as in the
+              reference: what works, then what to change. Renders nothing
+              when the backend filtered everything out. */}
+          <CategoryStrengths items={steps.commentary?.strengths?.[step.id]} />
+
+          {(step.findings.length > 0 || stepFixed.length > 0) && (
             <section>
               <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold">
                 Recommendations
@@ -168,20 +244,59 @@ export function AnalysisStepper({
                   {step.points_available === 1 ? "" : "s"}
                 </span>
               </h3>
-              <ul className="space-y-2">
-                {rankFindings(step.findings).map((f) => (
-                  <RecommendationCard
-                    key={f.id}
-                    finding={f}
-                    resumeId={resumeId}
-                    onFix={onFix}
-                  />
-                ))}
-              </ul>
+              {/* Experience is the only step with repeating subjects: the
+                  same "weak verb" finding can appear five times, once per
+                  job, distinguishable only by reading target_ref. Every
+                  other step has a single subject and a flat list is right. */}
+              {step.id === "experience" ? (
+                <GroupedFindings
+                  findings={step.findings}
+                  data={draft}
+                  resumeId={resumeId}
+                  onFix={onFix}
+                  onFixed={(f) => onFixed(step.id, f)}
+                />
+              ) : (
+                <ul className="space-y-2">
+                  {rankFindings(step.findings).map((f) => (
+                    <RecommendationCard
+                      key={f.id}
+                      finding={f}
+                      resumeId={resumeId}
+                      onFix={onFix}
+                      onFixed={(fd) => onFixed(step.id, fd)}
+                      presetDraft={bulkDrafts[`${f.id}::${f.target_ref}`]}
+                    />
+                  ))}
+                </ul>
+              )}
+
+              {stepFixed.length > 0 && (
+                <ul className="mt-2 space-y-2">
+                  {stepFixed.map((f) => (
+                    <RecommendationCard
+                      key={`fixed-${f.id}-${f.target_ref}`}
+                      finding={f}
+                      fixed
+                    />
+                  ))}
+                </ul>
+              )}
             </section>
           )}
 
-          {step.findings.length === 0 && (
+          {/* Step 4 only: the reference gives Format & Structure a bulk CTA
+              and a prerequisite notice that no other step has. */}
+          {step.id === "format" && (
+            <FormatStepPanel
+              steps={steps}
+              step={step}
+              resumeId={resumeId}
+              onDrafts={(d) => setBulkDrafts((prev) => ({ ...prev, ...d }))}
+            />
+          )}
+
+          {step.findings.length === 0 && step.id !== "format" && (
             <p className="flex items-center gap-2 rounded-xl border border-accept-text/30
                           bg-accept-text/10 px-3 py-2.5 text-sm text-accept-text">
               <Check className="size-4 shrink-0" aria-hidden />
@@ -213,13 +328,15 @@ export function AnalysisStepper({
 
 /* ---------------------------------------------------------------- list --- */
 function SectionList({
-  steps, total, available, onOpen, onExit,
+  steps, total, available, onOpen, onExit, headline, headlineStale,
 }: {
   steps: AnalysisStep[];
   total: number;
   available: number;
   onOpen: (i: number) => void;
   onExit?: () => void;
+  headline: string;
+  headlineStale: boolean;
 }) {
   return (
     <div className="space-y-4">
@@ -242,6 +359,21 @@ function SectionList({
             Score view
           </Button>
         )}
+      </div>
+
+      {/* The ScoringAgent's one-line verdict. Computed on every analysis
+          since the start; never shown until now. */}
+      <CommentaryBlock text={headline} stale={headlineStale}
+                       label="Overall Assessment" />
+
+      <div className="px-1">
+        <h2 className="text-base font-semibold text-content">
+          Steps to increase your score
+        </h2>
+        <p className="mt-1 text-xs text-content-muted">
+          Recruiter checks that are bringing your score down. Open each one to
+          see what to change and why.
+        </p>
       </div>
 
       <ol className="space-y-2">

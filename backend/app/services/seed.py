@@ -3,8 +3,17 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import JobDescription, Resume, ResumeVersion, Template, User
+from app.models import (
+    JobDescription,
+    Resume,
+    ResumeVersion,
+    Suggestion,
+    TailoringSession,
+    Template,
+    User,
+)
 from app.services.resume_ops import migrate
+from app.services.resume_ops import resolve as resume_ops_resolve
 
 USERS = [
     ("Priya Sharma", "priya@example.com", "Site Reliability Engineer", "#2563eb"),
@@ -168,6 +177,8 @@ Requirements:
 - Production Kubernetes and Docker experience
 - Terraform, AWS, PostgreSQL
 - Experience with GitOps and progressive delivery
+- 3+ years with Redis or a comparable caching layer
+- Comfortable working in an Agile team
 """
 
 DEMO_RESUME = {
@@ -245,6 +256,8 @@ def seed(db: Session) -> dict:
         "templates": 0,
         "resumes": 0,
         "job_descriptions": 0,
+        "suggestions": 0,
+        "tailoring_sessions": 0,
         "vector_docs": 0,
     }
 
@@ -317,9 +330,138 @@ def seed(db: Session) -> dict:
         created["resumes"] += 1
 
     db.flush()
+    created.update(_seed_tailoring(db))
     created["vector_docs"] = _seed_vectors(db)
 
     db.commit()
+    return created
+
+
+def _seed_tailoring(db: Session) -> dict:
+    """A finished tailoring session, including two unanswered questions.
+
+    Without this the `needs_input` state is unreachable without live API
+    keys: the only other way to produce one is a real tailoring run. A
+    feature that cannot be seen without a paid key does not get reviewed,
+    and this is the riskiest feature in the product.
+
+    The cards are not hand-written. The gap keywords and the question text
+    come from the same `match_keywords` / `questions_for_gaps` the live path
+    uses, so the seed cannot drift away from what the engine actually does
+    -- if the filter changes, this data changes with it.
+    """
+    from app.services.clarifying import questions_for_gaps
+    from app.services.heuristics import match_keywords
+
+    created = {"tailoring_sessions": 0, "suggestions": 0}
+
+    resume = db.scalar(select(Resume).order_by(Resume.created_at))
+    jd = db.scalar(select(JobDescription).where(JobDescription.is_sample.is_(True)))
+    if resume is None or jd is None:
+        return created
+    # Insert-only, the same guard the resume uses, so a second seed creates
+    # nothing and the idempotency test stays honest.
+    if db.scalar(select(TailoringSession).where(TailoringSession.resume_id == resume.id)):
+        return created
+
+    data = resume.structured_data or {}
+    scores = match_keywords(data, jd.extracted_keywords or [])
+    session = TailoringSession(
+        resume_id=resume.id,
+        job_description_id=jd.id,
+        thread_id="tailor-seed",
+        match_percent=scores["match_percent"],
+        baseline_percent=scores["match_percent"],
+        matched_keywords=scores["matched_keywords"],
+        gap_keywords=scores["gap_keywords"],
+        all_keywords=scores["all_keywords"],
+        graph_state="awaiting_review",
+    )
+    db.add(session)
+    db.flush()
+    created["tailoring_sessions"] = 1
+
+    questions = questions_for_gaps(scores["gap_keywords"], jd.content)
+    # The last one is seeded as ALREADY ANSWERED, so the post-attestation
+    # state is visible too. It is removed from the open set rather than
+    # duplicated: a card cannot be both an unanswered question and a
+    # confirmed fact about the same skill.
+    answered = questions.pop() if len(questions) > 2 else None
+    for q in questions:
+        db.add(Suggestion(
+            resume_id=resume.id,
+            session_id=session.id,
+            origin="tailor",
+            section="skills",
+            target_ref="",
+            placement=f"Job description asks for {q['label']}",
+            keywords=[q["keyword"]],
+            status="needs_input",
+            grounded=False,
+            question=q["question"],
+            requires_text=q["requires_text"],
+        ))
+        created["suggestions"] += 1
+
+    # One ordinary pending card beside the questions. The UI risk in this
+    # increment is not either card alone, it is the two shapes in one list.
+    if data.get("experience") and (data["experience"][0].get("bullets") or []):
+        original = data["experience"][0]["bullets"][0]
+        db.add(Suggestion(
+            resume_id=resume.id,
+            session_id=session.id,
+            origin="tailor",
+            section="experience",
+            # `exp_0.bullet_0`, not `experience.0.bullets.0`: the long form
+            # is not a ref resume_ops understands, so this demo card raised
+            # InvalidTargetRef the moment anyone clicked Accept.
+            target_ref="exp_0.bullet_0",
+            placement="Acme Corp - Senior SRE",
+            original_text=original,
+            # Must actually differ from the original. A seeded card whose
+            # draft equals its source accepts to a no-op and teaches the
+            # reader nothing about what accepting does.
+            suggested_text=(
+                "Led migration of 40 services to Kubernetes, cutting deploy "
+                "time by 65% and standardising rollouts across the platform"
+            ),
+            keywords=["kubernetes"],
+            reasoning="Mirrors the job description's phrasing for this duty.",
+            status="pending",
+            grounded=True,
+        ))
+        created["suggestions"] += 1
+
+    # And one already-answered card, so the post-attestation state is
+    # visible without anyone having to answer a question first.
+    if answered is not None:
+        skills_original = (
+            resume_ops_resolve(data, "skills.0.items") if data.get("skills") else ""
+        )
+        db.add(Suggestion(
+            resume_id=resume.id,
+            session_id=session.id,
+            origin="tailor",
+            section="skills",
+            target_ref="skills.0.items",
+            placement=f"Job description asks for {answered['label']}",
+            original_text=skills_original,
+            suggested_text=", ".join(
+                [*[i.strip() for i in skills_original.split(",") if i.strip()],
+                 answered["label"]]
+            ),
+            keywords=[answered["keyword"]],
+            reasoning=f"You confirmed {answered['label']} when asked.",
+            status="pending",
+            grounded=False,
+            attested=True,
+            question=answered["question"],
+            answer=f"Used {answered['label']} for two years on the platform team.",
+            requires_text=answered["requires_text"],
+        ))
+        created["suggestions"] += 1
+
+    db.flush()
     return created
 
 

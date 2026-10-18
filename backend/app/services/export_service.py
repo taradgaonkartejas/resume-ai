@@ -4,8 +4,12 @@ import uuid
 from app.config import settings
 from app.repositories.resume_repository import ResumeRepository
 from app.repositories.template_repository import TemplateRepository
-from app.services import storage
-from app.services.exceptions import ResumeNotFound, UnsupportedFormat
+from app.services import placeholders, storage
+from app.services.exceptions import (
+    ResumeNotFound,
+    UnfilledPlaceholder,
+    UnsupportedFormat,
+)
 from app.services.resume_ops import (
     date_label,
     education_lines,
@@ -179,6 +183,29 @@ class ExportService:
         resume = self.resumes.get_owned(resume_id, user_id)
         if resume is None:
             raise ResumeNotFound(str(resume_id))
+
+        # An unfilled [__] must never leave the building.
+        #
+        # The quantify rewrite deliberately puts a blank in the resume rather
+        # than inventing a figure, which means the document is briefly in a
+        # state that is WORSE to send than the missing metric it fixes. This
+        # refuses rather than warns: a warning on an export is read after the
+        # file is already downloaded and attached.
+        #
+        # Before the cache lookup, though not because correctness needs it:
+        # the key already contains version_cursor, so editing a placeholder
+        # in always misses. It sits here so the guard does not silently
+        # become dependent on how the key is composed.
+        unfilled = placeholders.find_in_resume(resume.structured_data or {})
+        if unfilled:
+            raise UnfilledPlaceholder(
+                f"This resume still has {len(unfilled)} unfilled "
+                f"{placeholders.PLACEHOLDER} placeholder"
+                f"{'s' if len(unfilled) > 1 else ''}. Replace "
+                f"{'them' if len(unfilled) > 1 else 'it'} with your real "
+                "figure before exporting.",
+                refs=unfilled,
+            )
 
         # The template is part of the cache identity: switching template must
         # produce a different PDF, and a key without it would serve the old

@@ -74,6 +74,19 @@ class Resume(Base):
     storage_key: Mapped[str] = mapped_column(String(400), default="")
     parse_status: Mapped[str] = mapped_column(String(20), default="pending")
     parse_note: Mapped[str] = mapped_column(Text, default="")
+    # Facts about the UPLOADED ORIGINAL that are destroyed by parsing: image
+    # count, table count, text found in the page's header band, distinct font
+    # count, detected column count. PLAN-ATS-COMPAT's document-level checks
+    # need them and cannot recover them from structured_data, because
+    # structured_data is precisely the thing that survived.
+    #
+    # ONE JSON column rather than five scalars, deliberately. The analysis
+    # commentary shipped three features with no migration by riding in
+    # `AnalysisReport.trace`, a JSONType blob; the sixth fact this grows will
+    # cost nothing. Five typed columns would buy query-ability nobody needs
+    # (these are read for one resume at a time, never filtered on) at the
+    # price of a reset per fact.
+    parse_facts: Mapped[dict] = mapped_column(JSONType, default=dict)
     template_key: Mapped[str] = mapped_column(
         String(40), ForeignKey("templates.key"), default="modern"
     )
@@ -204,8 +217,39 @@ class Suggestion(Base):
     edited_text: Mapped[str] = mapped_column(Text, default="")
     keywords: Mapped[list] = mapped_column(JSONType, default=list)
     reasoning: Mapped[str] = mapped_column(Text, default="")
+    # pending | accepted | rejected | needs_input
+    #
+    # `needs_input` is a QUESTION, not a draft: suggested_text is "" and the
+    # draft is written only after the answer arrives, because the answer is an
+    # input to it. It is deliberately NOT in TERMINAL -- a question is a state
+    # the user can still act on.
     status: Mapped[str] = mapped_column(String(20), default="pending")
+    # Supported by text ALREADY IN THE RESUME. Stays narrow on purpose: a
+    # user-attested fact is a different provenance and gets `attested` below.
+    # Widening this to mean "trustworthy" would make the flag lie to the
+    # critic path, which is the one reader that must not be lied to.
     grounded: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # --- clarifying-question flow (PLAN-8 Inc 6) ---
+    # Stored, not recomputed, so the answer can always be read next to the
+    # exact question it was given for.
+    question: Mapped[str] = mapped_column(Text, default="")
+    # What the user typed, VERBATIM. Never normalised, never paraphrased by a
+    # model: this is the audit record of the attestation, and a paraphrase
+    # stops being evidence of what the user actually said.
+    answer: Mapped[str] = mapped_column(Text, default="")
+    # True once this rests on a fact the user supplied rather than on resume
+    # text. The provenance question -- "did this sentence come from the
+    # resume, or from a box someone typed into?" -- must stay answerable from
+    # the row after acceptance.
+    attested: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Whether a bare "Yes" is enough. False for plain tool familiarity (a
+    # skills-list entry claims no employer, no duration, no outcome); True
+    # when the job description attaches a duration to the keyword, because
+    # "yes" to "3+ years of X" is an attestation the user has not actually
+    # made.
+    requires_text: Mapped[bool] = mapped_column(Boolean, default=False)
+
     critic_notes: Mapped[str] = mapped_column(Text, default="")
     revisions: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

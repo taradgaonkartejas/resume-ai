@@ -97,6 +97,29 @@ def update_data(
     return svc.update_data(resume_id, user_id, payload.structured_data)
 
 
+@router.post(
+    "/resumes/{resume_id}/sections/{target_ref}/rerank",
+    response_model=ResumeOut,
+)
+def rerank_section(
+    resume_id: uuid.UUID,
+    target_ref: str,
+    user_id: CurrentUser,
+    svc: Annotated[ResumeService, Depends(resume_service)],
+):
+    """Sort a section into canonical order. Deterministic, no model call.
+
+    Sibling of .../sections/{ref}/rewrite but deliberately NOT in
+    suggestions.py: rewrite produces a Suggestion for the user to approve,
+    whereas this edits the resume and records a version, so it belongs to
+    ResumeService by the same rule that put rewrite where it is.
+
+    409 when suggestions are still open on the section -- see
+    ResumeService.reorder_section.
+    """
+    return svc.reorder_section(resume_id, user_id, target_ref)
+
+
 @router.post("/resumes/{resume_id}/template", response_model=ResumeOut)
 def apply_template(
     resume_id: uuid.UUID, payload: TemplateIn, user_id: CurrentUser, svc: ResumeSvc

@@ -55,6 +55,16 @@ def test_every_task_model_is_free():
     assert not paid, f"paid models in TASK_MODELS: {paid}"
 
 
+#: A paid model for the chain tests below.
+#:
+#: Deliberately NOT a Gemini id. These tests use a paid model to prove
+#: the FREE filter drops it, but Gemini is now excluded on
+#: data-protection grounds and gets stripped earlier -- so with a
+#: Gemini stand-in the assertions passed without the free filter doing
+#: anything at all.
+PAID_STANDIN = "nvidia:acme/paid-model-xl"
+
+
 @pytest.mark.parametrize("task", sorted(TASK_MODELS))
 def test_resolved_chain_is_free_for_every_task(task):
     chain = resolve_chain(task)
@@ -64,16 +74,16 @@ def test_resolved_chain_is_free_for_every_task(task):
 
 def test_a_paid_model_is_stripped_from_the_chain(monkeypatch):
     """Even if someone appends one later, it never reaches the network."""
-    monkeypatch.setattr(llm, "FALLBACK_CHAIN", [settings.model_default, "gemini-3-flash"])
+    monkeypatch.setattr(llm, "FALLBACK_CHAIN", [settings.model_default, PAID_STANDIN])
     chain = resolve_chain("chat")
-    assert "gemini-3-flash" not in chain
+    assert PAID_STANDIN not in chain
     assert all(is_free(m) for m in chain)
 
 
 def test_a_paid_default_is_refused_rather_than_billed(monkeypatch):
     """A paid MODEL_DEFAULT with no free fallback must fail loudly."""
-    monkeypatch.setattr(llm, "FALLBACK_CHAIN", ["gemini-3-flash"])
-    monkeypatch.setattr(llm, "TASK_MODELS", {"chat": "gemini-3-flash"})
+    monkeypatch.setattr(llm, "FALLBACK_CHAIN", [PAID_STANDIN])
+    monkeypatch.setattr(llm, "TASK_MODELS", {"chat": PAID_STANDIN})
     with pytest.raises(LLMUnavailable) as err:
         resolve_chain("chat")
     assert "free" in str(err.value).lower()
@@ -81,8 +91,8 @@ def test_a_paid_default_is_refused_rather_than_billed(monkeypatch):
 
 def test_opting_out_is_possible_but_explicit(monkeypatch):
     monkeypatch.setattr(settings, "free_models_only", False)
-    monkeypatch.setattr(llm, "FALLBACK_CHAIN", [settings.model_default, "gemini-3-flash"])
-    assert "gemini-3-flash" in resolve_chain("chat")
+    monkeypatch.setattr(llm, "FALLBACK_CHAIN", [settings.model_default, PAID_STANDIN])
+    assert PAID_STANDIN in resolve_chain("chat")
 
 
 # --------------------------------------------------------- provider registry
@@ -502,3 +512,42 @@ def test_every_configured_default_model_is_free():
 def test_every_fallback_chain_entry_is_free():
     for model in llm.FALLBACK_CHAIN:
         assert is_free(model), f"fallback entry is not a free endpoint: {model}"
+
+
+def test_the_writing_chain_reaches_the_critics_model_last(monkeypatch):
+    """A writer failure must not land straight on the critic's own model.
+
+    FALLBACK_CHAIN's second entry IS the critic's model, so for a long time
+    the first writer failure silently destroyed writer/critic independence.
+    Two consecutive live corpus runs ended:
+
+        WARNING: the writer answered on groq:openai/gpt-oss-120b, which is
+        also the critic's model ... INCONCLUSIVE
+
+    Demoted, not dropped: a self-graded rewrite still passes _hard_check and
+    beats refusing the user a rewrite, but every independent option must be
+    exhausted first.
+    """
+    for p in llm.PROVIDERS.values():
+        monkeypatch.setattr(settings, p.key_setting, f"{p.name}-key-xxxxxxxxxxxx")
+
+    chain = resolve_chain("writing")
+    critic = TASK_MODELS["critique"]
+    assert critic in chain, "dropping it entirely would make writing fail closed"
+    assert chain[-1] == critic, (
+        f"the critic's model must be the LAST writing fallback, got {chain}"
+    )
+    assert chain[0] != critic
+    independent = [m for m in chain if m != critic]
+    assert independent, "the writing chain has no model independent of the critic"
+
+
+def test_other_tasks_are_not_reordered(monkeypatch):
+    """The demotion is specific to writing; nothing else should shift."""
+    for p in llm.PROVIDERS.values():
+        monkeypatch.setattr(settings, p.key_setting, f"{p.name}-key-xxxxxxxxxxxx")
+
+    critique = resolve_chain("critique")
+    assert critique[0] == TASK_MODELS["critique"], (
+        "the critic's own preferred model must stay first for its own task"
+    )

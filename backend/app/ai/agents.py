@@ -26,7 +26,7 @@ from app.ai.schemas import (
 )
 from app.ai.vectorstore import VectorStore
 from app.services import ats as ats_rules
-from app.services import resume_ops
+from app.services import placeholders, resume_ops
 from app.services.heuristics import (
     BULLET_COACHED_MAX,
     extract_keywords,
@@ -121,6 +121,61 @@ def _notes_or(notes, fallback: dict) -> dict:
     return {**fallback, **written}
 
 
+# A category must be scoring at least this fraction of its maximum before we
+# will repeat anything good about it. Below that the honest answer is silence:
+# "what's working well" in a category the engine is failing is flattery by
+# construction, and the user can see the score sitting next to it.
+STRENGTH_SCORE_FLOOR = 0.5
+
+# Three is the reference's count. It is also the cap, not a target -- the
+# failure mode this feature invites is a list padded to a fixed length.
+MAX_STRENGTHS_PER_CATEGORY = 3
+
+
+def _clean_strengths(strengths, rule_result: dict, resume_text: str) -> dict:
+    """Filter model-claimed strengths down to ones we can stand behind.
+
+    The prompt asks for evidence; this enforces it, because a prompt is a
+    request and a filter is a guarantee. Three deterministic rules, none of
+    which needs a judgement call:
+
+    1. **A failing category gets nothing.** Praise for a category scoring
+       under half marks contradicts the number printed beside it.
+    2. **No unsourced digits.** Reuses `unverifiable_numbers`, the same
+       digits-only guard that catches a writer inventing a metric -- a
+       strength claiming "cut costs 40%" when no 40 appears in the resume is
+       the identical failure in a friendlier voice.
+    3. **Hard cap.** Padding to a fixed length is the vacuity failure the
+       writer corpus already taught us to watch for.
+
+    Semantic flattery -- "excellent formatting" about mediocre formatting --
+    survives all three, and no regex will catch it. That is the critic's
+    kind of problem, and this feature does not have one; the score floor is
+    the blunt instrument that keeps it bounded.
+    """
+    scores = rule_result.get("category_scores") or {}
+    out: dict[str, list[str]] = {}
+
+    for name, items in strengths.model_dump().items():
+        cat = scores.get(name) or {}
+        maximum = cat.get("max") or 0
+        if maximum <= 0 or cat.get("score", 0) < maximum * STRENGTH_SCORE_FLOOR:
+            out[name] = []
+            continue
+
+        kept: list[str] = []
+        for raw in items or []:
+            text = (raw or "").strip()
+            if not text or unverifiable_numbers(resume_text, text):
+                continue
+            kept.append(text)
+            if len(kept) >= MAX_STRENGTHS_PER_CATEGORY:
+                break
+        out[name] = kept
+
+    return out
+
+
 def score_commentary(
     structured_data: dict, rule_result: dict, store: VectorStore | None = None
 ) -> AgentOutcome:
@@ -165,6 +220,9 @@ def score_commentary(
                     "category_notes": _notes_or(
                         parsed.category_notes, fallback_notes
                     ),
+                    "strengths": _clean_strengths(
+                        parsed.strengths, rule_result, summary
+                    ),
                 },
                 agent="scoring",
                 model=call.model,
@@ -185,7 +243,16 @@ def score_commentary(
         else "Needs substantial work before applying."
     )
     return AgentOutcome(
-        value={"headline": verdict, "category_notes": fallback_notes},
+        # No strengths without a model. The rule engine only knows what is
+        # WRONG -- every check it runs emits a finding or stays silent -- so
+        # there is nothing here to turn into praise, and inventing some from
+        # "this check passed" would be exactly the padding the LLM path is
+        # filtered to prevent.
+        value={
+            "headline": verdict,
+            "category_notes": fallback_notes,
+            "strengths": {},
+        },
         agent="scoring",
         notes=["rule-engine commentary"],
     )
@@ -394,13 +461,27 @@ def unverifiable_numbers(resume_text: str, suggested: str) -> set[str]:
     }
 
 
-def _self_check(draft: dict, structured_data: dict) -> str | None:
+def _self_check(
+    draft: dict, structured_data: dict, finding_id: str = ""
+) -> str | None:
     """Why this draft would be rejected, phrased for the writer to act on.
 
-    Deliberately the same two deterministic rules the critic's hard checks
-    apply, so the retry prompt cannot drift away from what is actually
-    enforced downstream.
+    Deliberately the same deterministic rules the critic's hard checks apply,
+    so the retry prompt cannot drift away from what is actually enforced
+    downstream.
     """
+    # Quantify rewrites are graded FIRST and by a stricter rule. The generic
+    # number check compares against the whole resume, which would happily
+    # pass a figure lifted out of another job's bullet -- still a fabricated
+    # claim about this role. check_draft compares against this line only, and
+    # also enforces the placeholder that is the entire point of the mode.
+    if finding_id in placeholders.QUANTIFY_FINDINGS:
+        complaint = placeholders.check_draft(
+            draft.get("original_text", ""), draft.get("suggested_text", "")
+        )
+        if complaint:
+            return complaint
+
     invented = unverifiable_numbers(
         resume_ops.to_plain_text(structured_data),
         draft.get("suggested_text", ""),
@@ -743,6 +824,22 @@ def _rule_critique(original: str, draft: dict) -> CriticVerdict:
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z+.#-]{2,}")
 
 
+def _length_rule(target_ref: str) -> str:
+    """The length instruction for this target, matching what the rules check.
+
+    A summary and a bullet are scored against opposite length rules, so one
+    sentence cannot serve both. `heuristics.py` wants a summary of 30-60
+    words and a bullet under 30; telling the writer "under 30 words" for
+    every target made `summary.too_short` unfixable by construction.
+    """
+    if target_ref.startswith("summary"):
+        return (
+            "Aim for 30 to 60 words -- long enough to name the role, the "
+            "years and one concrete result."
+        )
+    return "Under 30 words, starting with a strong verb."
+
+
 def rewrite_for_finding(
     structured_data: dict,
     target_ref: str,
@@ -768,17 +865,57 @@ def rewrite_for_finding(
     original = resume_ops.resolve(structured_data, target_ref)
     composing = not original.strip()
 
+    # Findings that cannot be fixed from the target text alone. Keyed on the
+    # finding id rather than the target, because two summary findings want
+    # opposite things: too_short needs the resume's substance, no_metric
+    # must not be handed it.
+    needs_substance = finding.get("id") in {"summary.too_short"}
+
+    # The two findings whose fix is a number the writer must never invent.
+    # Instead of refusing, it restructures the line so a figure FITS and
+    # leaves a [__] for the candidate -- see services/placeholders.py.
+    quantifying = finding.get("id") in placeholders.QUANTIFY_FINDINGS
+
     context = _grounding_context(
-        structured_data, target_ref, user_id, resume_id, store, composing
+        structured_data, target_ref, user_id, resume_id, store, composing,
+        needs_substance=needs_substance,
     )
 
     if llm.is_configured():
         try:
-            system = (
-                prompts.COMPOSER.format(context=context)
-                if composing
-                else prompts.REVISER.format(context=context)
-            )
+            # The length rule is TARGET-DEPENDENT, and hardcoding the
+            # bullet form made one finding literally unfixable.
+            #
+            # heuristics.py raises `summary.too_short` with the message
+            # "Summary is short (N words) -- aim for 30-60", while this
+            # prompt said "Under 30 words". The model was told to exceed 30
+            # and to stay under 30 in the same breath.
+            #
+            # Precisely: the finding clears at >= 25 words, so a 25-29 word
+            # answer would in fact have satisfied both. But nothing told the
+            # model that window existed, and both providers failed in
+            # opposite directions -- groq refused outright ("I cannot expand
+            # the summary to 30-60 words without introducing new
+            # information") and claude-sonnet-5 obeyed the cap, leaving the
+            # finding in place (changed=True, fixed=False).
+            #
+            # Contradictory instructions, not a model defect.
+            if quantifying and not composing:
+                # Composing wins when there is no text at all: you cannot
+                # "make room for a number" in an empty summary, and the
+                # composer already refuses to invent one.
+                system = prompts.QUANTIFIER.format(
+                    context=context,
+                    length_rule=_length_rule(target_ref),
+                    placeholder=placeholders.PLACEHOLDER,
+                )
+            elif composing:
+                system = prompts.COMPOSER.format(context=context)
+            else:
+                system = prompts.REVISER.format(
+                    context=context,
+                    length_rule=_length_rule(target_ref),
+                )
             payload = (
                 f"Problem to fix: {finding.get('message', '')}\n"
                 f"Guidance: {finding.get('fix_hint', '')}\n\n"
@@ -820,7 +957,9 @@ def rewrite_for_finding(
                 }
                 last = (value, call)
 
-                complaint = _self_check(value, structured_data)
+                complaint = _self_check(
+                    value, structured_data, finding.get("id", "")
+                )
                 if complaint is None or attempt == 2:
                     # Attempt 2 is returned even when it still fails: the
                     # critic and the same hard checks run again downstream and
@@ -876,13 +1015,28 @@ def _grounding_context(
     resume_id: uuid.UUID | None,
     store: VectorStore | None,
     composing: bool,
+    needs_substance: bool = False,
 ) -> str:
     """This candidate's own text, for tone (revise) or substance (compose).
 
     Composing a summary needs the whole resume, not five similar bullets --
     the summary has to be true of the document as a whole.
+
+    `needs_substance` extends that to a REVISE whose finding cannot be
+    satisfied from the target text alone. `summary.too_short` is the case:
+    turning "Built platforms for 6 years." into 30-60 words is a compose-
+    scale job wearing a revise label, and with tone-only grounding the model
+    is being asked to triple the length of a sentence while forbidden from
+    inventing. claude-sonnet-5 read that correctly and declined
+    (changed=False); groq refused in words. Both were marked failures for
+    doing the right thing.
+
+    Deliberately NOT applied to every summary finding. `summary.no_metric`
+    expects a decline precisely because the model should not reach for a
+    number, and handing it the experience section -- which is full of real
+    ones -- would change what that case tests.
     """
-    if composing:
+    if composing or needs_substance:
         lines = [
             f"- {text}" for _ref, _placement, text in resume_ops.iter_bullets(structured_data)
         ][:12]

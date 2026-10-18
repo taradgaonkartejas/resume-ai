@@ -48,6 +48,19 @@ async function expectStatus(promise, want, label) {
 
 const section = (t) => console.log(`\n=== ${t} ===`);
 
+/**
+ * Record a section that could not run, loudly and in the tally.
+ *
+ * Not counted as a pass: a skipped section has proved nothing, and a gate
+ * that reports "all green" while silently skipping is worse than one that
+ * fails.
+ */
+let skipped = 0;
+function skip(why) {
+  skipped++;
+  console.log(`  SKIP ${why}`);
+}
+
 const users = (await axios.get(`${BASE}/users`)).data;
 const USER = users[0].id;
 const OTHER = users[1].id;
@@ -58,6 +71,11 @@ const asOther = axios.create({ baseURL: BASE, headers: { "X-User-Id": OTHER } })
 section("system");
 const health = (await api.get("/health")).data;
 hasFields(health, ["status", "database", "pgvector", "storage", "llm_configured", "model", "users"], "GET /health");
+// The AI-rewrite section needs a writer. Without one the deterministic
+// fallback returns the bullet unchanged, which the service reports as a
+// 422 needs_your_fact -- a legitimate answer that used to crash this
+// script and take the two sections after it down with it.
+const LLM_ON = health.llm_configured === true;
 hasFields(users[0], ["id", "name", "title", "avatar_color", "chat_tokens_left"], "GET /users");
 ok(users.length === 5, "5 seeded users", `${users.length}`);
 
@@ -207,11 +225,31 @@ section("analysis/steps");
 // Unlike /analysis this must work before anything has been analysed, because
 // the guided flow is what produces the first score.
 const st0 = (await api.get(`/resumes/${blank.id}/analysis/steps`)).data;
-hasFields(st0, ["resume_id", "overall_score", "max_score", "points_available", "steps"], "GET /analysis/steps");
+hasFields(st0, ["resume_id", "overall_score", "max_score", "points_available", "steps", "commentary", "commentary_stale"], "GET /analysis/steps");
 ok(st0.max_score === 100, "steps max_score = 100", `${st0.max_score}`);
 
 const st = (await api.get(`/resumes/${BASE_ID}/analysis/steps`)).data;
 const stepIds = st.steps.map((x) => x.id);
+hasFields(st.commentary, ["headline", "category_notes"], "steps commentary shape");
+{
+  // `strengths` is optional by design: reports written before the field
+  // existed lack the key, and the rule-engine fallback returns {}. So the
+  // assertion is about SHAPE when present, not presence.
+  const strengths = st.commentary.strengths;
+  ok(strengths === undefined || (typeof strengths === "object" && !Array.isArray(strengths)),
+     "commentary.strengths is absent or an object", typeof strengths);
+  const bad = Object.entries(strengths ?? {}).filter(
+    ([, v]) => !Array.isArray(v) || v.some((x) => typeof x !== "string"),
+  );
+  ok(bad.length === 0, "every strengths value is string[]", bad.map(([k]) => k).join(",") || "ok");
+  const over = Object.entries(strengths ?? {}).filter(([, v]) => v.length > 3);
+  ok(over.length === 0, "strengths capped at 3 per category", over.map(([k]) => k).join(",") || "ok");
+}
+// The guided editor is the screen that renders this prose. It was generated
+// and persisted on every analysis for months and returned to nobody; if it
+// silently drops off this response again, that regression is invisible.
+ok(typeof st.commentary_stale === "boolean",
+   "commentary_stale must be a real boolean -- undefined would render as 'fresh'");
 ok(JSON.stringify(stepIds) === JSON.stringify(["contact", "summary", "experience", "format", "extras"]), "5 steps in order, extras last", stepIds.join(","));
 ok(st.steps.every((x, i) => x.index === i), "step.index matches position");
 ok(st.overall_score === st.steps.reduce((a, x) => a + x.score, 0), "overall = sum of step scores", `${st.overall_score}`);
@@ -263,11 +301,23 @@ ok(typeof stale === "number", "stored report keeps its own score", `${stale}`);
 section("tailor");
 const sess = (await api.post(`/resumes/${BASE_ID}/tailor`, { jd_title: "SRE at Probe", jd_content: jd.content })).data;
 hasFields(sess, ["id", "resume_id", "job_description_id", "match_percent", "baseline_percent", "matched_keywords", "gap_keywords", "thread_id", "graph_state", "created_at"], "POST /tailor");
-ok(sess.resume_id !== BASE_ID, "tailoring FORKED (session.resume_id is the child)");
+// Tailoring is IN PLACE: the session must stay on the resume we asked about,
+// otherwise the Analysis and Tailor tabs edit different rows and an accepted
+// suggestion appears to do nothing.
+ok(sess.resume_id === BASE_ID, "tailoring is IN PLACE (session.resume_id is the base)");
+
+// Everything downstream works through the session above, so CHILD must stay
+// "the resume `sess` edits" -- which in-place means the base itself.
 const CHILD = sess.resume_id;
-const child = (await api.get(`/resumes/${CHILD}`)).data;
-ok(child.kind === "tailored" && child.parent_id === BASE_ID, "child linked to base");
-ok(typeof child.tailored_for === "string" && child.tailored_for.length > 0, "tailored_for set", child.tailored_for);
+
+// Forking still exists, opt-in. Its child also outlives this section: the
+// delete-semantics section needs a real child of BASE_ID to orphan.
+const forkSess = (await api.post(`/resumes/${BASE_ID}/tailor`, { jd_title: "Fork probe", jd_content: jd.content, fork: true })).data;
+ok(forkSess.resume_id !== BASE_ID, "fork:true still forks");
+const TAILOR_CHILD = forkSess.resume_id;
+const forked = (await api.get(`/resumes/${TAILOR_CHILD}`)).data;
+ok(forked.kind === "tailored" && forked.parent_id === BASE_ID, "forked child linked to base");
+ok(typeof forked.tailored_for === "string" && forked.tailored_for.length > 0, "tailored_for set", forked.tailored_for);
 
 const sessions = (await api.get(`/resumes/${CHILD}/tailor`)).data;
 ok(Array.isArray(sessions) && sessions.length >= 1, "GET /tailor lists sessions", `${sessions.length}`);
@@ -277,17 +327,31 @@ const bucketNames = Object.keys(buckets).sort();
 ok(JSON.stringify(bucketNames) === JSON.stringify(["active", "matched", "rejected"]), "bucket names", bucketNames.join(","));
 const all = [...buckets.active, ...buckets.matched, ...buckets.rejected];
 if (all.length) {
-  hasFields(all[0], ["id", "session_id", "resume_id", "origin", "section", "target_ref", "placement", "original_text", "suggested_text", "edited_text", "keywords", "reasoning", "status", "grounded", "critic_notes", "revisions"], "SuggestionOut shape");
+  hasFields(all[0], ["id", "session_id", "resume_id", "origin", "section", "target_ref", "placement", "original_text", "suggested_text", "edited_text", "keywords", "reasoning", "status", "grounded", "critic_notes", "revisions", "score_delta", "question", "answer", "attested", "requires_text"], "SuggestionOut shape");
+  // Same currency as the Analysis tab. A missing field renders as NaN points.
+  ok(all.every((x) => typeof x.score_delta === "number"),
+     "score_delta must be a number on every suggestion");
+  // The review gate rejects any draft that introduces a finding, and
+  // `delta score == points` holds, so a negative delta means that gate has a
+  // hole. Assert it here so the hole surfaces in CI, not in a resume.
+  ok(all.every((x) => x.score_delta >= 0),
+     "no suggestion may LOWER the resume score");
   const statuses = [...new Set(all.map((s) => s.status))];
-  ok(statuses.every((s) => ["pending", "accepted", "rejected"].includes(s)), "status vocabulary is pending/accepted/rejected", statuses.join(","));
-  ok(buckets.active.every((s) => s.status === "pending"), "active bucket holds pending rows");
+  ok(statuses.every((s) => ["pending", "accepted", "rejected", "needs_input"].includes(s)), "status vocabulary", statuses.join(","));
+  // `active` is open items, which now means drafts AND unanswered questions.
+  ok(buckets.active.every((s) => ["pending", "needs_input"].includes(s.status)), "active bucket holds open rows");
 }
 
 /* -------------------------------------------------------- suggestions --- */
 section("suggestions");
-ok(buckets.active.length >= 3, "enough active suggestions to test accept/reject/edit", `${buckets.active.length}`);
-if (buckets.active.length) {
-  const target = buckets.active[0];
+ok(buckets.active.filter((s) => s.status === "pending").length >= 3, "enough draft suggestions to test accept/reject/edit", `${buckets.active.filter((s) => s.status === "pending").length}`);
+// Questions lead `active`, and a question cannot be accepted or edited --
+// it has no draft. This section is about the accept/reject/edit lifecycle,
+// so it must pick a DRAFT. Taking active[0] blindly started 422-ing the
+// moment question cards began sorting first.
+const drafts = buckets.active.filter((s) => s.status === "pending");
+if (drafts.length) {
+  const target = drafts[0];
   const before = (await api.get(`/resumes/${CHILD}`)).data;
   const acc = (await api.patch(`/suggestions/${target.id}`, { action: "accept" })).data;
   ok(acc.status === "accepted", "PATCH accept -> accepted", acc.status);
@@ -296,15 +360,17 @@ if (buckets.active.length) {
   ok(after.version_cursor > before.version_cursor, "accept bumps version_cursor", `${before.version_cursor}->${after.version_cursor}`);
 
   const rest = (await api.get(`/resumes/${CHILD}/tailor/${sess.id}/suggestions`)).data;
-  if (rest.active.length) {
-    const rej = (await api.patch(`/suggestions/${rest.active[0].id}`, { action: "reject" })).data;
+  const restDrafts = rest.active.filter((s) => s.status === "pending");
+  if (restDrafts.length) {
+    const rej = (await api.patch(`/suggestions/${restDrafts[0].id}`, { action: "reject" })).data;
     ok(rej.status === "rejected", "PATCH reject -> rejected");
     const afterRej = (await api.get(`/resumes/${CHILD}`)).data;
     ok(JSON.stringify(afterRej.structured_data) === JSON.stringify(after.structured_data), "reject does NOT mutate the resume");
   }
   const rest2 = (await api.get(`/resumes/${CHILD}/tailor/${sess.id}/suggestions`)).data;
-  if (ok(rest2.active.length > 0, "a suggestion remains for the edit test")) {
-    const ed = (await api.patch(`/suggestions/${rest2.active[0].id}`, { action: "edit", edited_text: "My own wording." })).data;
+  const rest2Drafts = rest2.active.filter((s) => s.status === "pending");
+  if (ok(rest2Drafts.length > 0, "a draft remains for the edit test")) {
+    const ed = (await api.patch(`/suggestions/${rest2Drafts[0].id}`, { action: "edit", edited_text: "My own wording." })).data;
     ok(ed.edited_text === "My own wording.", "PATCH edit stores edited_text");
   }
   await expectStatus(api.patch(`/suggestions/${target.id}`, { action: "banana" }), 422, "invalid action -> 422");
@@ -349,6 +415,7 @@ for (const [label, make] of [
   ["POST undo", () => asOther.post(`/resumes/${BASE_ID}/undo`)],
   ["PATCH rename", () => asOther.patch(`/resumes/${BASE_ID}`, { title: "hijack" })],
   ["POST fork", () => asOther.post(`/resumes/${BASE_ID}/fork`, {})],
+  ["POST rerank", () => asOther.post(`/resumes/${BASE_ID}/sections/experience/rerank`)],
   ["DELETE", () => asOther.delete(`/resumes/${BASE_ID}`)],
 ]) {
   // Lazily: an eagerly-created rejected promise is an unhandled rejection
@@ -356,8 +423,106 @@ for (const [label, make] of [
   await expectStatus(make(), 404, `other user ${label} -> 404`);
 }
 
-section("AI rewrite — POST /resumes/{id}/sections/{ref}/rewrite");
+section("rerank — POST /resumes/{id}/sections/{ref}/rerank (deterministic, no keys needed)");
 {
+  const scratch = (await api.post("/resumes", { title: "Rerank probe" })).data;
+  const outOfOrder = {
+    contact: { name: "Probe", email: "p@x.io", phone: "+1 555 0100", links: [] },
+    summary: { text: "Engineer with six years of backend and platform work across cloud services." },
+    experience: [
+      { company: "Oldcorp", role: "Junior", start_date: "2017", end_date: "2019", bullets: ["Shipped billing."] },
+      { company: "Newcorp", role: "Senior", start_date: "2021", end_date: "2023", bullets: ["Cut build times 65%."] },
+    ],
+    projects: [], education: [], skills: [{ label: "Languages", items: ["Python"] }],
+  };
+  await api.put(`/resumes/${scratch.id}/data`, { structured_data: outOfOrder });
+
+  const before = (await api.get(`/resumes/${scratch.id}/analysis/steps`)).data;
+  const chrono = before.steps
+    .flatMap((st) => st.findings)
+    .find((f) => f.id === "ats.not_reverse_chronological");
+  ok(Boolean(chrono), "fixture trips ats.not_reverse_chronological");
+  ok(chrono?.action === "rerank", "finding carries action=rerank", chrono?.action);
+
+  const after = (await api.post(`/resumes/${scratch.id}/sections/experience/rerank`)).data;
+  const roles = after.structured_data.experience.map((e) => e.role);
+  ok(JSON.stringify(roles) === JSON.stringify(["Senior", "Junior"]), "rerank sorts newest-first", roles.join(","));
+
+  const steps2 = (await api.get(`/resumes/${scratch.id}/analysis/steps`)).data;
+  const still = steps2.steps.flatMap((st) => st.findings).some((f) => f.id === "ats.not_reverse_chronological");
+  ok(!still, "the finding is gone after rerank");
+  ok(steps2.overall_score > before.overall_score, "score rose", `${before.overall_score} -> ${steps2.overall_score}`);
+
+  await expectStatus(
+    api.post(`/resumes/${scratch.id}/sections/summary.text/rerank`),
+    422,
+    "non-reorderable ref -> 422",
+  );
+
+  await api.delete(`/resumes/${scratch.id}`);
+}
+
+section("clarifying questions — POST /suggestions/{id}/answer (no keys needed)");
+{
+  // Above the AI-rewrite section on purpose: without provider keys that
+  // section aborts the run, so anything placed after it never executes.
+  // The session the tailor section created above, on the live JD -- not the
+  // seeded one. BASE_ID is this probe's own upload and has no session, and
+  // reading seed data would test the seeder rather than the endpoint.
+  const fresh = (await api.get(`/resumes/${CHILD}/tailor/${sess.id}/suggestions`)).data;
+  {
+    const buckets = fresh;
+    const questions = (buckets.active ?? []).filter((s) => s.status === "needs_input");
+    ok(questions.length > 0, "tailoring produced question cards", String(questions.length));
+    ok(
+      (buckets.active ?? [])[0]?.status === "needs_input",
+      "questions lead the active bucket",
+      (buckets.active ?? [])[0]?.status,
+    );
+
+    const q = questions[0];
+    hasFields(q, ["question", "answer", "attested", "requires_text"], "question card shape");
+    ok(q.question.length > 0, "a needs_input card carries question text");
+    ok(q.suggested_text === "", "a question has no draft", JSON.stringify(q.suggested_text));
+    ok(q.grounded === false, "a question is not grounded", String(q.grounded));
+    // The anti-leading rule, asserted on the wire rather than trusted.
+    ok(
+      /leave (this |it )?blank/i.test(q.question),
+      "the question states the do-nothing option",
+      q.question.slice(0, 60),
+    );
+
+    // A question cannot be accepted: there is nothing to apply. axios
+    // rejects on 4xx, so these go through expectStatus, not a status read.
+    await expectStatus(
+      api.patch(`/suggestions/${q.id}`, { action: "accept" }),
+      422,
+      "accepting a question is refused",
+    );
+
+    const needsText = questions.find((x) => x.requires_text);
+    if (needsText) {
+      await expectStatus(
+        api.post(`/suggestions/${needsText.id}/answer`, { confirmed: true }),
+        422,
+        "a bare yes cannot attest a duration",
+      );
+    }
+
+    // Declining is a 200 that rejects, not an error -- so this one is a
+    // plain await and would throw if the server ever made it a 4xx.
+    const declinable = questions[questions.length - 1];
+    const declined = (await api.post(`/suggestions/${declinable.id}/answer`, { answer: "" })).data;
+    ok(declined.status === "rejected", "a declined question is rejected", declined.status);
+    ok(declined.suggested_text === "", "a decline produces no draft");
+    ok(declined.attested === false, "a decline attests nothing");
+  }
+}
+
+section("AI rewrite — POST /resumes/{id}/sections/{ref}/rewrite");
+if (!LLM_ON) {
+  skip("no provider key configured (health.llm_configured=false)");
+} else {
   // Its own resume, so this block owns every byte it asserts on.
   const rw = (await api.post("/resumes", { title: `Rewrite probe ${Date.now()}` })).data;
   await api.put(`/resumes/${rw.id}/data`, {
@@ -513,8 +678,11 @@ const delChild = (await api.delete(`/resumes/${fork.id}`)).data;
 hasFields(delChild, ["deleted", "vectors_removed", "objects_removed", "children_orphaned"], "DeleteOut shape");
 const delBase = (await api.delete(`/resumes/${BASE_ID}`)).data;
 ok(delBase.children_orphaned >= 1, "deleting a base ORPHANS children", `${delBase.children_orphaned}`);
-const survivor = (await api.get(`/resumes/${CHILD}`)).data;
+// The tailor fork, not CHILD: in-place mode makes CHILD the base, and the
+// base was just deleted.
+const survivor = (await api.get(`/resumes/${TAILOR_CHILD}`)).data;
 ok(survivor.parent_id === null, "orphaned child survives with parent_id=null");
 
-console.log(fail ? `\n>>> ${fail} FAILURES (${pass} passed)` : `\n>>> all ${pass} checks passed`);
+const tally = skipped ? ` (${skipped} section(s) SKIPPED)` : "";
+console.log(fail ? `\n>>> ${fail} FAILURES (${pass} passed)${tally}` : `\n>>> all ${pass} checks passed${tally}`);
 process.exit(fail ? 1 : 0);

@@ -39,6 +39,20 @@ export const resumeService = {
       structured_data: structuredData,
     }),
 
+  /**
+   * POST /api/resumes/{id}/sections/{ref}/rerank
+   *
+   * Sorts a section into canonical order. Deterministic and server-side, so
+   * the ordering can never drift from the ATS check that grades it.
+   *
+   * 409 when suggestions are still open on that section: target_refs are
+   * positional, so reordering would re-point them at a different role.
+   */
+  rerankSection: (resumeId: string, targetRef: string) =>
+    http.post<ResumeOut>(
+      `/resumes/${resumeId}/sections/${encodeURIComponent(targetRef)}/rerank`,
+    ),
+
   /** POST /api/resumes/{id}/template — non-destructive; moves template_key
    *  only, because content and layout are decoupled. */
   applyTemplate: (resumeId: string, templateKey: string) =>

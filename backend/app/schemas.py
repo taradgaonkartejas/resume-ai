@@ -89,6 +89,13 @@ class ParseStatusOut(BaseModel):
     resume_id: str
     parse_status: str
     parse_note: str
+    #: Advisories about the UPLOADED FILE's machine-readability.
+    #:
+    #: Distinct from `parse_note`, which reports that reading FAILED. These
+    #: accompany a successful parse and say the reading may have been shaky
+    #: -- two columns, a scan, a heading we did not recognise. Advisory
+    #: only: none of them is a scored finding.
+    parse_advisories: list[str] = []
 
 
 # ---------- analysis ----------
@@ -183,14 +190,28 @@ class AnalysisStepsOut(BaseModel):
     points_available: int
     steps: list[StepOut] = Field(default_factory=list)
 
+    # The ScoringAgent's prose, carried alongside the live steps. Already
+    # generated and persisted on every analysis; until now no screen read it.
+    commentary: CommentaryOut = Field(default_factory=CommentaryOut)
+    # True when the resume has changed since that prose was written. The
+    # steps beside it are recomputed live, so the two CAN disagree, and the
+    # UI must be able to say so rather than presenting stale prose as fact.
+    commentary_stale: bool = False
+
 
 # ---------- tailoring ----------
 class TailorIn(BaseModel):
     jd_title: str = ""
     jd_content: str
-    # Tailoring forks a new resume so the base stays pristine and each job
-    # gets its own card. false keeps the old in-place behaviour.
-    fork: bool = True
+    # Tailoring edits the resume IN PLACE so the Analysis and Tailor tabs
+    # always describe the same document.
+    #
+    # This used to default to True. Forking produced a child row, the
+    # session pointed at the child, and the two tabs silently edited
+    # DIFFERENT resumes: accept a suggestion in Tailor and Analysis would
+    # go on showing the untouched original. Opt in per request to keep a
+    # pristine base alongside per-job variants.
+    fork: bool = False
 
 
 class TailorSessionOut(BaseModel):
@@ -226,6 +247,39 @@ class SuggestionOut(BaseModel):
     critic_notes: str
     revisions: int
 
+    # --- clarifying-question flow ---
+    # `question` is non-empty only on a needs_input card. `attested` stays
+    # True after answering, which is how the UI keeps showing "you told us
+    # this" on a card whose status has moved on to pending.
+    question: str = ""
+    answer: str = ""
+    attested: bool = False
+    requires_text: bool = False
+
+    # What accepting this would do to the RESUME score -- the same currency
+    # the Analysis tab prints on its cards, so the two tabs can be compared.
+    #
+    # Deterministic and free: apply the patch to a copy, rescore with the
+    # same rule engine the UI shows, subtract. `introduced_findings` was
+    # already computing the patched score during review and throwing the
+    # number away.
+    #
+    # Usually 0 -- a keyword swap that neither helps nor hurts the rule
+    # engine is the common case, and saying "no score change" is more
+    # honest than hiding the field. It should never be negative: the
+    # review gate rejects any draft that introduces a finding, and
+    # `Delta score == points` holds, so a negative here means that gate has
+    # a hole. Surfaced rather than clamped, so the hole would be visible.
+    score_delta: int = 0
+
+    # True when the resume text this was written against has since changed.
+    #
+    # `act()` already blocks applying one of these -- it would overwrite newer
+    # work -- but it blocks at click time, after the user has read the card
+    # and decided. Surfacing it on the card turns a 409 into a state the UI
+    # can show. Only ever true for pending suggestions.
+    is_stale: bool = False
+
 
 class SuggestionBuckets(BaseModel):
     active: list[SuggestionOut]
@@ -239,6 +293,19 @@ class RewriteRequest(BaseModel):
     finding_id: str = ""
     # Supersede the existing pending draft for this ref instead of returning it.
     regenerate: bool = False
+
+
+class SuggestionAnswer(BaseModel):
+    """Answering a clarifying question.
+
+    Two fields because the reference offers two affordances and they attest
+    different amounts. `answer` is the user's own sentence. `confirmed` is
+    the bare Yes button, which is accepted ONLY on a question with no
+    duration attached -- see Suggestion.requires_text.
+    """
+
+    answer: str = ""
+    confirmed: bool = False
 
 
 class SuggestionAction(BaseModel):
@@ -282,6 +349,32 @@ class VersionOut(BaseModel):
     change_source: str
     label: str
     created_at: datetime
+
+
+class AcceptAllIn(BaseModel):
+    """Scope for a document-level Accept All.
+
+    Omitting `session_id` means every pending suggestion on the resume,
+    which is what the Analysis pane wants; the Tailor pane passes its
+    session so one job's run cannot sweep up another's.
+    """
+
+    session_id: uuid.UUID | None = None
+
+
+class SkippedSuggestion(BaseModel):
+    id: str
+    reason: str
+
+
+class AcceptAllOut(BaseModel):
+    applied: list[str]
+    applied_count: int
+    skipped: list[SkippedSuggestion]
+    skipped_count: int
+    #: The cursor BEFORE the batch -- the seq Decline All restores to.
+    undo_to_version: int
+    version_cursor: int
 
 
 # ---------- misc ----------

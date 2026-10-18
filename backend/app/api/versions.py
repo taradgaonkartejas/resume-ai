@@ -23,6 +23,17 @@ def undo(resume_id: uuid.UUID, user_id: CurrentUser, svc: Svc):
     return svc.undo(resume_id, user_id)
 
 
+@router.post("/resumes/{resume_id}/restore/{seq}", response_model=ResumeOut)
+def restore(resume_id: uuid.UUID, seq: int, user_id: CurrentUser, svc: Svc):
+    """Multi-step undo: move the cursor to `seq`.
+
+    This is what document-level "Decline Changes" calls. It reuses the one
+    version cursor rather than keeping a second history, so declining and
+    undoing can never disagree about what the resume used to be.
+    """
+    return svc.restore(resume_id, user_id, seq)
+
+
 @router.post("/resumes/{resume_id}/redo", response_model=ResumeOut)
 def redo(resume_id: uuid.UUID, user_id: CurrentUser, svc: Svc):
     return svc.redo(resume_id, user_id)

@@ -15,6 +15,16 @@ export const versionService = {
   /** POST /api/resumes/{id}/undo → the resume at the previous cursor. */
   undo: (resumeId: string) => http.post<ResumeOut>(`/resumes/${resumeId}/undo`),
 
+  /**
+   * POST /api/resumes/{id}/restore/{seq} → multi-step undo.
+   *
+   * What document-level "Decline Changes" calls. It moves the SAME cursor
+   * undo moves, only further, so declining and undoing cannot disagree
+   * about what the resume used to be. Redo still walks forward afterwards.
+   */
+  restore: (resumeId: string, seq: number) =>
+    http.post<ResumeOut>(`/resumes/${resumeId}/restore/${seq}`),
+
   /** POST /api/resumes/{id}/redo */
   redo: (resumeId: string) => http.post<ResumeOut>(`/resumes/${resumeId}/redo`),
 };

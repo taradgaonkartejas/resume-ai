@@ -61,12 +61,22 @@ export class ApiError extends Error {
     return this.isTimeout || this.status === 503 || this.status === 429;
   }
 
-  /** Nothing the user can do will change this answer, so do not offer a
-   *  retry. `needs_your_fact` means the writer is refusing to invent a
-   *  number it cannot find in the resume -- a rule, not a hiccup. Asking
-   *  again just replays two model calls to reach the same 422. */
+  /** Nothing the user can do *in this session* will change this answer, so
+   *  do not offer a retry.
+   *
+   *  `needs_your_fact` -- a model read the line and is refusing to invent a
+   *  number it cannot find in the resume. A rule, not a hiccup; asking again
+   *  just replays two model calls to reach the same 422.
+   *
+   *  `writer_not_configured` -- no AI writer exists, so only the rule engine
+   *  ran and it had no mechanical fix. Equally permanent until a key is
+   *  added, and it MUST be listed here: a new reason that matched no branch
+   *  would quietly fall back to the retryable path and offer a button that
+   *  can never succeed. */
   get isFinalRefusal(): boolean {
-    return this.reason === "needs_your_fact";
+    return (
+      this.reason === "needs_your_fact" || this.reason === "writer_not_configured"
+    );
   }
 
   /** The backend returns 404 both for a missing resume and for one owned by

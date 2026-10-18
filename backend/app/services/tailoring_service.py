@@ -145,6 +145,45 @@ class TailoringService:
                 grounded=True,
             )
 
+        # Gaps the writer could not draft for, because the resume holds no
+        # evidence of them. Until now these ended as grey chips: the system
+        # knew exactly what was missing and asked nobody. A keyword the user
+        # genuinely has is a free match-percent point; one they do not have
+        # is a card they reject in a second.
+        #
+        # Only skill-like gaps, and only a handful -- see clarifying.py.
+        from app.services.clarifying import questions_for_gaps
+
+        drafted = {
+            k.lower()
+            for draft in drafts
+            for k in (draft.get("keywords") or [])
+        }
+        for q in questions_for_gaps(scores["gap_keywords"], jd_content):
+            # Do not ask about something the writer already worked in.
+            if q["keyword"].lower() in drafted or q["label"].lower() in drafted:
+                continue
+            self.suggestions.create(
+                resume_id=resume.id,
+                session_id=session.id,
+                origin="tailor",
+                section="skills",
+                # No target_ref yet: where it lands is decided when the
+                # answer arrives, not before. A question is not a patch.
+                target_ref="",
+                placement=f"Job description asks for {q['label']}",
+                original_text="",
+                suggested_text="",
+                keywords=[q["keyword"]],
+                reasoning="",
+                status="needs_input",
+                # The resume does NOT support this -- that is the entire
+                # reason there is a question.
+                grounded=False,
+                question=q["question"],
+                requires_text=q["requires_text"],
+            )
+
         self.db.commit()
         return session
 

@@ -1,8 +1,25 @@
+import {
+  closestCenter,
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
 import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BulletRow, DateRangeField, Field, TextAreaField, TipsPanel } from "./fields";
 import { dateLabel } from "@/lib/dates";
 import { ExtrasEditor } from "./ExtrasEditor";
+import { SortableRole } from "./SortableRole";
+import { useStableIds } from "./useStableIds";
 import type { StepKey, StructuredData } from "@/services";
 
 /**
@@ -150,6 +167,11 @@ function SummarySection({ data, onChange, focusRef }: Props) {
 }
 
 /* ---------------------------------------------------------- experience --- */
+/* Drag ordering is manual and immediate; the one-click "Reorder newest-first"
+   on the ATS finding goes through POST /sections/experience/rerank instead,
+   which refuses while suggestions are open. A hand drag deliberately does
+   not: it is the user explicitly rearranging their own document, and the
+   resulting ref drift is caught by SuggestionOut.is_stale. */
 function ExperienceSection({ data, onChange, focusRef }: Props) {
   const entries = data.experience ?? [];
 
@@ -159,11 +181,42 @@ function ExperienceSection({ data, onChange, focusRef }: Props) {
     onChange(next);
   };
 
+  const { ids, reorder } = useStableIds(entries.length);
+  const sensors = useSensors(
+    // A small distance constraint so that clicking into a text field inside
+    // the card is never mistaken for the start of a drag.
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  const onDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const from = ids.indexOf(String(active.id));
+    const to = ids.indexOf(String(over.id));
+    if (from < 0 || to < 0) return;
+    // Ids and data must receive the SAME permutation or every subsequent
+    // drag addresses the wrong card.
+    reorder(from, to);
+    mutate((d) => {
+      const [moved] = d.experience.splice(from, 1);
+      d.experience.splice(to, 0, moved);
+    });
+  };
+
   return (
     <div className="space-y-4">
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        modifiers={[restrictToVerticalAxis]}
+        onDragEnd={onDragEnd}
+      >
+        <SortableContext items={ids} strategy={verticalListSortingStrategy}>
+          <div className="space-y-4">
       {entries.map((entry, i) => (
-        <div key={i} className="rounded-xl border border-line-soft bg-surface-2 p-3">
-          <div className="grid gap-3 sm:grid-cols-2">
+        <SortableRole key={ids[i]} id={ids[i]}>
+          <div className="grid gap-3 pr-9 sm:grid-cols-2">
             <Field label="Company" value={entry.company ?? ""}
                    onChange={(v) => mutate((d) => { d.experience[i].company = v; })} />
             <Field label="Role" value={entry.role ?? ""}
@@ -214,8 +267,11 @@ function ExperienceSection({ data, onChange, focusRef }: Props) {
               <Plus className="size-3.5" aria-hidden /> Add achievement
             </Button>
           </div>
-        </div>
+        </SortableRole>
       ))}
+          </div>
+        </SortableContext>
+      </DndContext>
 
       <TipsPanel tips={[
         "Start each bullet with a verb: Led, Built, Reduced, Migrated.",

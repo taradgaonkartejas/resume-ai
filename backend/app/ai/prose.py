@@ -103,6 +103,77 @@ def looks_like_fabrication(text: str) -> bool:
     return any(word in low for word in _FABRICATION_WORDS)
 
 
+# A reply that is a refusal, a question, or commentary ABOUT a rewrite rather
+# than the rewrite itself. Accepting one of these as `suggested_text` would
+# put "I cannot help with that" into somebody's resume.
+_NOT_A_REWRITE = (
+    "i cannot", "i can't", "i am unable", "i'm unable", "as an ai",
+    "i do not have", "i don't have", "sorry", "unfortunately",
+    "could you", "can you provide", "please provide", "what is the",
+)
+
+# A PREAMBLE: the model announcing its answer before giving it. Taking the
+# whole reply as `suggested_text` pastes "Here is a better bullet:" into the
+# resume. Matched only at the start, and only up to a nearby colon, so a
+# legitimate "Led migration: cut downtime 40%" is untouched.
+_PREAMBLE = re.compile(
+    r"^(here|this|that|revised|suggested|improved|rewritten|updated|new|"
+    r"better|output|answer|result|draft|version|bullet|summary|rewrite)"
+    r"\b[^:]{0,60}:",
+    re.I,
+)
+
+# META-COMMENTARY: the model explaining itself inside the answer. The
+# diffusiongemma decline replies mixed rule citations into the prose, and a
+# reader that trusted the whole string would ship them to the user.
+_META = re.compile(
+    r"\b(violat\w+|rule\s*\d|the original|originally|i (?:have |'ve )?"
+    r"(?:changed|rewritten|revised|added|removed)|note that|instead of|"
+    r"this version|as requested|per your)\b",
+    re.I,
+)
+
+
+def looks_like_a_rewrite(text: str) -> bool:
+    """True when `text` could plausibly BE the replacement text.
+
+    Deliberately strict. This backs the prose salvage rung for RevisionDraft,
+    whose output is written straight into a resume, so the cost of a false
+    positive is high and the cost of a false negative is only that the caller
+    degrades exactly as it does today.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    # Paragraph breaks must be read from the ORIGINAL -- _flatten collapses
+    # all whitespace, so checking it there silently never matches. (It
+    # didn't: the multi-paragraph case passed this guard on the first try.)
+    if "\n\n" in raw or "\r\n\r\n" in raw:
+        return False
+    # Leftover JSON scaffolding means the ok-json rung should have taken it.
+    if raw.startswith(("{", "[")) or '":' in raw:
+        return False
+    t = _flatten(raw)
+    if not t:
+        return False
+    if any(t.startswith(p) or f" {p}" in t[:80] for p in _NOT_A_REWRITE):
+        return False
+    # Order matters: refusals, preambles and commentary are all detected
+    # BEFORE the text is considered usable. A tripwire in
+    # test_llm_transport.py required exactly this, and caught the first
+    # version of this function accepting "Here is a better bullet: Led X."
+    if _PREAMBLE.match(raw.strip()):
+        return False
+    if _META.search(raw):
+        return False
+    if t.endswith("?"):
+        return False
+    # A rewritten bullet or summary is one short block.
+    if len(t) > 900 or len(t) < 15:
+        return False
+    return True
+
+
 _FENCE = re.compile(r"```(?:json)?\s*(.+?)```", re.S | re.I)
 
 

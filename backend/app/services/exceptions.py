@@ -67,6 +67,19 @@ class UnsupportedFormat(ValidationError):
     pass
 
 
+class UnfilledPlaceholder(ValidationError):
+    """Export refused: the resume still contains a `[__]` the user must fill.
+
+    A ValidationError (422) rather than a conflict, because the request is
+    genuinely unsatisfiable until the document changes, and the client can
+    act on it: `refs` says exactly which fields to send the user to.
+    """
+
+    def __init__(self, message: str, refs: list[str] | None = None):
+        super().__init__(message)
+        self.refs = refs or []
+
+
 class RewriteRejected(ValidationError):
     """The writer ran and produced nothing usable, so nothing was persisted.
 
@@ -78,8 +91,16 @@ class RewriteRejected(ValidationError):
     both, and a user could sit there re-requesting a rewrite the system is
     designed never to produce.
 
-        needs_your_fact     the writer cannot add a number that is not in the
-                            resume. Retrying cannot change this.
+        needs_your_fact     a MODEL considered the line and cannot add a
+                            number that is not in the resume. Retrying cannot
+                            change this.
+        writer_not_configured
+                            no AI writer exists, so only the rule engine ran
+                            and it had no mechanical fix. Also permanent, but
+                            it is NOT a verdict about the user's facts -- the
+                            two were conflated, and a keyless server told
+                            people their resume needed a number they did not
+                            have. Fixed by adding a provider key.
         critic_rejected     a draft existed but failed grounding review.
                             Another attempt may well succeed.
         nothing_to_rewrite  the writer returned empty.

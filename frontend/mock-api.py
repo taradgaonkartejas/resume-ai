@@ -174,7 +174,9 @@ def make_suggestions(session_id, resume_id, gaps):
                     f"The job description asks for {kw}; your existing work "
                     f"already demonstrates it, so the bullet now names it.",
                 "status": "pending", "grounded": True,
-                "critic_notes": "", "revisions": 0,
+                "critic_notes": "", "revisions": 0, "score_delta": 0,
+                "question": "", "answer": "", "attested": False,
+                "requires_text": False,
                 "created_at": datetime.now(timezone.utc).isoformat()}
 
     active = [
@@ -193,6 +195,35 @@ def make_suggestions(session_id, resume_id, gaps):
             "Cut alert noise by tuning thresholds",
             f"Cut alert noise by tuning {gaps[1] if len(gaps) > 1 else 'Grafana'} thresholds",
             "Acme Corp · Senior SRE"),
+    ]
+    def question(kw, text, requires_text):
+        return {"id": str(uuid.uuid4()), "session_id": session_id,
+                "resume_id": resume_id, "origin": "tailor",
+                "section": "skills", "target_ref": "",
+                "placement": f"Job description asks for {kw}",
+                "original_text": "", "suggested_text": "", "edited_text": "",
+                "keywords": [kw.lower()], "reasoning": "",
+                "status": "needs_input", "grounded": False,
+                "critic_notes": "", "revisions": 0, "score_delta": 0,
+                "question": text, "answer": "", "attested": False,
+                "requires_text": requires_text,
+                "created_at": datetime.now(timezone.utc).isoformat()}
+
+    # Questions lead `active`, mirroring SuggestionService.list_for_session.
+    # Both variants, because the one that needs text is the one with a
+    # disabled button and a server-side 422 behind it.
+    active = [
+        question("Redis",
+                 "This job asks for 3+ years of Redis, which does not appear "
+                 "in your resume. If you have that experience, say where - "
+                 "which role, and how long. If you do not, leave this blank "
+                 "and reject the card.", True),
+        question("Agile",
+                 "Agile appears in this job description but not in your "
+                 "resume. If you have used it, say where - which role, and "
+                 "what you did with it. If you have not, leave this blank "
+                 "and reject the card.", False),
+        *active,
     ]
     matched = [{**one(2, "Kubernetes",
                       "Reduced pager volume by 45% by rewriting alert rules around SLOs",
@@ -231,7 +262,7 @@ def analysis_for(r, refresh=False):
         # returns with no provider key: present, typed, empty. The client
         # renders both conditionally, and "absent" and "nothing to say" must
         # not look alike to it.
-        "commentary": {"headline": "", "category_notes": {}},
+        "commentary": {"headline": "", "category_notes": {}, "strengths": {}},
         "ats_review": {"expansions": [], "note": ""},
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -722,6 +753,29 @@ def steps_for(r):
         "overall_score": sum(s["score"] for s in steps),
         "max_score": sum(s["max"] for s in steps),
         "points_available": sum(s["points_available"] for s in steps),
+        "commentary": {
+            "headline": "Strong technical detail; the summary is doing the least work.",
+            "category_notes": {
+                "contact": "Everything a recruiter needs is present.",
+                "summary": "Concrete, but it opens with a passive phrase.",
+                "experience": "Well quantified. Keep every metric you have.",
+                "format": "Clean and ATS-readable.",
+            },
+            # Deliberately uneven: summary is empty, because an empty list is
+            # a real and expected answer, not a loading state. A mock where
+            # every category has three entries would hide the one case the
+            # UI most needs to handle.
+            "strengths": {
+                "contact": ["Phone, email and location are all present."],
+                "summary": [],
+                "experience": [
+                    "Quantified the build-time cut from 20 minutes to 6 minutes.",
+                    "Every bullet opens with a strong action verb.",
+                ],
+                "format": ["Standard section headings an ATS can parse."],
+            },
+        },
+        "commentary_stale": False,
         "steps": steps,
     }
 
@@ -887,6 +941,49 @@ class H(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b""
 
+        m = re.fullmatch(r"/api/suggestions/([0-9a-f-]+)/answer", p)
+        if m:
+            body = json.loads(raw or b"{}")
+            answer = (body.get("answer") or "").strip()
+            confirmed = bool(body.get("confirmed"))
+            for buckets in SUGGESTIONS.values():
+                for sug in list(buckets["active"]):
+                    if sug["id"] != m.group(1) or sug["status"] != "needs_input":
+                        continue
+                    if sug["requires_text"] and not answer:
+                        # A button cannot attest "3+ years".
+                        return self._send(422, {"detail":
+                            "This one asks how long and where, so a yes is "
+                            "not enough - type what you did, or reject the "
+                            "card."})
+                    kw = (sug["keywords"] or [""])[0]
+                    attested = (kw.lower() in answer.lower()) or (
+                        confirmed and not sug["requires_text"])
+                    sug["answer"] = answer
+                    if not attested:
+                        # Declining is a normal 200, not an error -- and the
+                        # card is REJECTED, never softened into a vague claim.
+                        buckets["active"].remove(sug)
+                        sug["status"] = "rejected"
+                        buckets["rejected"].append(sug)
+                        return self._send(200, sug)
+                    tgt = RESUMES.get(sug["resume_id"])
+                    groups = (tgt or {}).get("structured_data", {}).get("skills") or []
+                    original = ", ".join(groups[0].get("items", [])) if groups else ""
+                    label = kw[:1].upper() + kw[1:]
+                    sug["target_ref"] = "skills.0.items"
+                    sug["original_text"] = original
+                    sug["suggested_text"] = ", ".join(
+                        [*[i.strip() for i in original.split(",") if i.strip()], label])
+                    sug["attested"] = True
+                    sug["grounded"] = False
+                    sug["status"] = "pending"
+                    sug["reasoning"] = (
+                        f"You confirmed {label} when the job description "
+                        f"asked for it. Added to your skills list.")
+                    return self._send(200, sug)
+            return self._send(404, {"detail": "No such question"})
+
         if p == "/api/resumes/upload":
             uid = self._uid()
             if not uid:
@@ -984,7 +1081,7 @@ class H(BaseHTTPRequestHandler):
                 "edited_text": "", "keywords": [], "reasoning":
                     "Opened with a stronger verb.",
                 "status": "pending", "grounded": True, "critic_notes": "",
-                "revisions": 0,
+                "revisions": 0, "score_delta": 2,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
             bucket["active"].append(sug)
@@ -1052,7 +1149,7 @@ class H(BaseHTTPRequestHandler):
                        "edited_text": "", "keywords": ["SRE"],
                        "reasoning": "The original is generic and omits your level.",
                        "status": "pending", "grounded": True,
-                       "critic_notes": "", "revisions": 0, "created_at": now}
+                       "critic_notes": "", "revisions": 0, "score_delta": 0, "created_at": now}
                 SUGGESTIONS.setdefault("chat", {"active": [], "matched": [],
                                                 "rejected": []})["active"].append(sug)
 
@@ -1100,7 +1197,8 @@ class H(BaseHTTPRequestHandler):
             body = json.loads(raw or b"{}")
             label = (body.get("jd_title") or "Untitled role").strip()
             target = src
-            if body.get("fork", True):
+            # Mirrors the real API: in-place by default, fork on request.
+            if body.get("fork", False):
                 target = new_record(
                     src["user_id"], f"{src['title']} - {label}",
                     structured_data=json.loads(json.dumps(src["structured_data"])),
@@ -1173,6 +1271,11 @@ class H(BaseHTTPRequestHandler):
                 for sug in list(buckets["active"]):
                     if sug["id"] != m.group(1):
                         continue
+                    # A question has no draft, so there is nothing to accept
+                    # or edit. Mirrors SuggestionService.act.
+                    if sug["status"] == "needs_input" and action != "reject":
+                        return self._send(422, {"detail":
+                            "Answer this question before accepting it."})
                     # edit rewrites the SUGGESTION and leaves it pending; it
                     # does not touch the resume. Mirrors SuggestionService.act.
                     if action == "edit":

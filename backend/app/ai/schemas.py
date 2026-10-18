@@ -55,6 +55,30 @@ class CategoryNotes(BaseModel):
     format: str = ""
 
 
+class CategoryStrengths(BaseModel):
+    """What the resume already does RIGHT, per category.
+
+    Explicit fields for the same reason as CategoryNotes above: a
+    `dict[str, list[str]]` renders `additionalProperties: {...}`, which
+    Groq's strict json_schema mode rejects on every model at once. The
+    categories are fixed by the rule engine, so naming them costs nothing.
+
+    This is the only part of the analysis that is asked to say something
+    POSITIVE, which makes it the only part with an incentive to flatter --
+    the rule engine emits findings, and a finding is by definition a
+    problem. An always-three-items list would be the vacuity failure from
+    writer_report wearing a different hat, so the prompt demands evidence
+    and `agents._clean_strengths` enforces what a prompt cannot.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    contact: list[str] = Field(default_factory=list)
+    summary: list[str] = Field(default_factory=list)
+    experience: list[str] = Field(default_factory=list)
+    format: list[str] = Field(default_factory=list)
+
+
 class ScoringCommentary(BaseModel):
     """Prose only. The numbers come from the rule engine."""
 
@@ -64,6 +88,18 @@ class ScoringCommentary(BaseModel):
     category_notes: CategoryNotes = Field(
         default_factory=CategoryNotes,
         description="Per-category advice for contact, summary, experience, format",
+    )
+    # Rides on the SAME call as the notes above, so "What's Working Well"
+    # costs no extra tokens and cannot disagree with the commentary beside
+    # it -- two calls could, and at 40 analyses/month that matters.
+    strengths: CategoryStrengths = Field(
+        default_factory=CategoryStrengths,
+        description=(
+            "Per category, up to 3 things the resume already does well. "
+            "Quote or name the specific text that proves each one. "
+            "Return an empty list for a category with nothing genuinely good "
+            "-- an empty list is a correct answer, padding is not."
+        ),
     )
 
 
@@ -83,6 +119,50 @@ class RevisionDraft(BaseModel):
         default_factory=list, description="Terms added or surfaced, for highlighting"
     )
     reasoning: str = Field(description="Why this is better, one or two sentences")
+
+    @classmethod
+    def from_prose(cls, text: str) -> RevisionDraft | None:
+        """Recover a rewrite from a model that answered in plain text.
+
+        Added after `nvidia:meta/muse-glimmer-30b` failed EVERY case of the
+        writer corpus with
+
+            unparsable: Invalid JSON: expected value at line 1 column 1
+            input_value='Reduced CI pipeline runtime from 22 minutes to 9 ...'
+
+        -- which is a correct, well-formed rewrite that was thrown away for
+        not being wrapped in JSON. With no salvage rung the whole chain fell
+        through to the critic's own model, collapsing writer/critic
+        independence and making the run inconclusive.
+
+        This is the single most common LLM failure mode in this project, and
+        every other schema that meets it (CriticVerdict, CriticBatch,
+        AtsReview) already has this. RevisionDraft was the gap.
+
+        Fails closed, like the others: anything that does not clearly look
+        like replacement prose returns None and the caller degrades exactly
+        as it does today. The danger here is specific -- `suggested_text` is
+        written into somebody's resume -- so a refusal, a question, a
+        multi-paragraph explanation or leftover JSON is refused rather than
+        guessed at.
+
+        Safety is unchanged downstream: a salvaged draft still passes through
+        `_hard_check` (verbatim-original, introduced-findings, and the
+        digits-only fabrication guard) and still goes to the critic. This
+        recovers the TEXT, never the approval.
+        """
+        if not prose.looks_like_a_rewrite(text):
+            return None
+        cleaned = prose.first_sentences(text, limit=900).strip()
+        if not cleaned:
+            return None
+        return cls(
+            suggested_text=cleaned,
+            keywords=[],
+            # Empty rather than invented. The UI shows this to the user, and
+            # a made-up justification for a real edit is its own small lie.
+            reasoning="",
+        )
 
 
 class WriterOutput(BaseModel):

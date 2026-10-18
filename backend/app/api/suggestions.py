@@ -5,7 +5,14 @@ from fastapi import APIRouter, Depends
 
 from app.api.deps import suggestion_service
 from app.identity import CurrentUser
-from app.schemas import RewriteRequest, SuggestionAction, SuggestionOut
+from app.schemas import (
+    AcceptAllIn,
+    AcceptAllOut,
+    RewriteRequest,
+    SuggestionAction,
+    SuggestionAnswer,
+    SuggestionOut,
+)
 from app.services.suggestion_service import SuggestionService
 
 router = APIRouter(tags=["suggestions"])
@@ -19,6 +26,45 @@ def act_on_suggestion(
     svc: Annotated[SuggestionService, Depends(suggestion_service)],
 ):
     return svc.act(suggestion_id, user_id, payload.action, payload.edited_text)
+
+
+@router.post("/suggestions/{suggestion_id}/answer", response_model=SuggestionOut)
+def answer_question(
+    suggestion_id: uuid.UUID,
+    payload: SuggestionAnswer,
+    user_id: CurrentUser,
+    svc: Annotated[SuggestionService, Depends(suggestion_service)],
+):
+    """Supply the fact a clarifying question asked for.
+
+    Returns 200 with the card either moved to `pending` (attested) or to
+    `rejected` (declined) -- declining is a normal outcome, not an error, so
+    it is not a 4xx. 422 is reserved for a yes with no text on a question
+    that needs text.
+    """
+    return svc.answer_question(
+        suggestion_id, user_id, payload.answer, payload.confirmed
+    )
+
+
+@router.post("/resumes/{resume_id}/suggestions/accept-all", response_model=AcceptAllOut)
+def accept_all(
+    resume_id: uuid.UUID,
+    user_id: CurrentUser,
+    svc: Annotated[SuggestionService, Depends(suggestion_service)],
+    payload: AcceptAllIn | None = None,
+):
+    """Apply every applicable pending suggestion as ONE version.
+
+    One undo reverts the whole batch. Suggestions that are stale or waiting
+    on an answer are skipped and named in the response rather than forced --
+    the button saves clicks on the uncontroversial ones, it does not
+    overrule the checks that stop a patch landing on text it was not
+    written against.
+    """
+    return svc.accept_all(
+        resume_id, user_id, payload.session_id if payload else None
+    )
 
 
 @router.post(

@@ -245,5 +245,6 @@ def test_a_422_says_why_in_a_field_the_client_can_branch_on(client, headers, res
     )
     assert resp.status_code == 422, resp.text
     assert resp.json()["reason"] in {
-        "needs_your_fact", "critic_rejected", "nothing_to_rewrite",
+        "needs_your_fact", "writer_not_configured", "critic_rejected",
+        "nothing_to_rewrite",
     }

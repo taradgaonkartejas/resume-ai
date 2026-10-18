@@ -31,6 +31,13 @@ Experience heading? -- are handled separately by the ATS agent.
 
 import re
 
+# experience_sort_key lives in resume_ops because resume_ops owns date
+# parsing and, crucially, because reorder_experience needs the same key:
+# ats already imports resume_ops, so defining it here would have forced a
+# circular import and a private cross-module reference.
+from app.services.resume_ops import (
+    experience_sort_key as _sort_key,
+)
 from app.services.resume_ops import split_dates, to_plain_text
 
 #: Characters that tokenise badly in legacy parsers. Arrows, emoji, box
@@ -101,23 +108,6 @@ def unparseable_dates(data: dict) -> list[str]:
         if split_dates(raw) is None and not _PARSEABLE_DATE.match(raw):
             bad.append(ref)
     return bad
-
-
-def _sort_key(entry: dict) -> tuple[int, int]:
-    """(year, month) of the end date; "Present" sorts newest."""
-    if entry.get("current"):
-        return (9999, 12)
-    value = (entry.get("end_date") or entry.get("start_date") or "").strip()
-    year = re.search(r"(19|20)\d{2}", value)
-    if not year:
-        return (0, 0)
-    month = re.match(
-        r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)", value, re.IGNORECASE
-    )
-    months = ["jan", "feb", "mar", "apr", "may", "jun",
-              "jul", "aug", "sep", "oct", "nov", "dec"]
-    m = months.index(month.group(1).lower()) + 1 if month else 0
-    return (int(year.group(0)), m)
 
 
 def out_of_order_experience(data: dict) -> bool:

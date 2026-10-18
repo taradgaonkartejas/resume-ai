@@ -5,16 +5,25 @@ from copy import deepcopy
 from app.config import settings
 from app.models import Resume
 from app.repositories.resume_repository import ResumeRepository
+from app.repositories.suggestion_repository import SuggestionRepository
 from app.repositories.template_repository import TemplateRepository
 from app.repositories.vector_repository import VectorRepository
 from app.services import storage
 from app.services.exceptions import (
+    ConflictError,
+    InvalidTargetRef,
     ResumeNotFound,
     TemplateNotFound,
     UnsupportedFormat,
     ValidationError,
 )
-from app.services.resume_ops import empty_resume, migrate
+from app.services.parsing import parse_advisories
+from app.services.resume_ops import (
+    REORDERABLE_SECTIONS,
+    empty_resume,
+    migrate,
+    reorder_experience,
+)
 from app.services.version_service import VersionService
 
 logger = logging.getLogger(__name__)
@@ -29,11 +38,13 @@ class ResumeService:
         templates: TemplateRepository,
         vectors: VectorRepository,
         versions: VersionService,
+        suggestions: SuggestionRepository,
     ) -> None:
         self.resumes = resumes
         self.templates = templates
         self.vectors = vectors
         self.versions = versions
+        self.suggestions = suggestions
 
     @property
     def db(self):
@@ -199,6 +210,50 @@ class ResumeService:
         self.db.commit()
         return resume
 
+    def reorder_section(
+        self, resume_id: uuid.UUID, user_id: uuid.UUID, target_ref: str
+    ) -> Resume:
+        """Sort a section into its canonical order. Experience only, for now.
+
+        Deterministic: no model call, no tokens, and nothing to fabricate --
+        `reorder_experience` asserts the result is a permutation of the input
+        before it is saved.
+
+        Refuses while pending suggestions point into the section. target_refs
+        are positional, so a reorder silently re-points every outstanding
+        draft at a different entry's text. `_is_stale` catches most of that
+        afterwards by comparing text, but it cannot catch a bullet duplicated
+        across two roles -- that one would apply cleanly to the wrong job.
+        DESIGN.md already promised these two never overlap; this enforces it.
+        """
+        if target_ref not in REORDERABLE_SECTIONS:
+            raise InvalidTargetRef(
+                f"{target_ref} cannot be reordered. "
+                f"Reorderable: {', '.join(REORDERABLE_SECTIONS)}."
+            )
+
+        resume = self.get(resume_id, user_id)
+
+        blocking = self.suggestions.pending_with_ref_prefix(resume_id, "exp_")
+        if blocking:
+            raise ConflictError(
+                f"{len(blocking)} suggestion"
+                f"{'' if len(blocking) == 1 else 's'} still open on your "
+                "experience. Accept or reject them first -- reordering now "
+                "would point them at the wrong role."
+            )
+
+        reordered = reorder_experience(resume.structured_data or {})
+        if reordered == (resume.structured_data or {}):
+            return resume
+
+        resume.structured_data = reordered
+        self.versions.record(
+            resume, reordered, "manual", "Reordered experience newest-first"
+        )
+        self.db.commit()
+        return resume
+
     def apply_template(
         self, resume_id: uuid.UUID, user_id: uuid.UUID, template_key: str
     ) -> Resume:
@@ -250,4 +305,9 @@ class ResumeService:
             "resume_id": str(resume.id),
             "parse_status": resume.parse_status,
             "parse_note": resume.parse_note,
+            # Derived on read rather than stored. The FACTS are what we
+            # observed and never change; the sentences we choose to show
+            # about them will, and a stored message would be frozen at
+            # whatever we thought useful on the day of the upload.
+            "parse_advisories": parse_advisories(resume.parse_facts or {}),
         }

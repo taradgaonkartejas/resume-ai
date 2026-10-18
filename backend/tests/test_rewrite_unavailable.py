@@ -90,10 +90,19 @@ def test_a_writer_that_ran_and_could_not_help_still_returns_422(
         )
 
     # No LLM configured => the rule engine ran on purpose, not as a fallback
-    # from a failed call, so a no-op here is a real statement about the finding.
+    # from a failed call, so a no-op here is a real statement about the finding
+    # -- and 422 stays right, because retrying without a key changes nothing.
+    #
+    # What it is NOT is a verdict about the user's facts. No model read this
+    # line, so "the writer cannot add a number that is not in your resume"
+    # was a confident claim nothing had formed. The status was always correct;
+    # only the stated cause was wrong.
     assert response.status_code in (201, 422)
     if response.status_code == 422:
-        assert "fact only you have" in response.json()["detail"]
+        body = response.json()
+        assert body["reason"] == "writer_not_configured"
+        assert "fact only you have" not in body["detail"]
+        assert "no ai writer is configured" in body["detail"].lower()
 
 
 def test_the_two_causes_do_not_share_a_status_code(client, priya, priya_resume):

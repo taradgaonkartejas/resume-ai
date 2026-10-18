@@ -385,6 +385,48 @@ def _no_key_message() -> str:
 # report it was printed inside.
 _DROP_LOGGED: set[str] = set()
 
+_EXCLUDED_LOGGED: set[str] = set()
+
+#: Model families that must never receive resume data.
+#:
+#: The exclusion follows the DATA, not the brand. Google's free tier trains on
+#: submissions from outside the EEA/UK/CH, and these payloads are real names,
+#: phone numbers and employment history -- so it applies through a reseller
+#: too: `codecraft:gemini-3.1-pro` is as excluded as a direct call.
+#:
+#: Matched on the bare model name as well as the qualified id, so a new
+#: provider prefix cannot smuggle one back in.
+EXCLUDED_MODEL_RE = re.compile(r"(?:^|[/:])(gemini|gemma)\b", re.I)
+
+
+def is_excluded(qualified: str) -> bool:
+    """True for a model that must never be called, whatever the routing says.
+
+    This is a guard, not a preference. `MODEL_DEFAULT=gemini-3.5-flash-lite:free`
+    sits in a real .env, and model_default is FALLBACK_CHAIN[0] -- so it was the
+    first fallback for EVERY task. The only thing stopping it was an empty
+    UnoRouter key, and an empty key is luck rather than a control.
+    """
+    _provider, name = split_model(qualified)
+    return bool(EXCLUDED_MODEL_RE.search(name) or EXCLUDED_MODEL_RE.search(qualified))
+
+
+def _drop_excluded(chain: list[str], task: str) -> list[str]:
+    """Remove excluded models from a chain, warning once per model."""
+    banned = [m for m in chain if is_excluded(m)]
+    for model in banned:
+        if model not in _EXCLUDED_LOGGED:
+            _EXCLUDED_LOGGED.add(model)
+            logger.warning(
+                "%r is configured for the %s chain but is EXCLUDED on "
+                "data-protection grounds and will never be called. Remove it "
+                "from backend/.env (MODEL_DEFAULT / MODEL_*) -- until you do, "
+                "that task silently runs on its next fallback.",
+                model,
+                task,
+            )
+    return [m for m in chain if not is_excluded(m)]
+
 
 def resolve_chain(task: str) -> list[str]:
     """The models to try for a task, nearest first.
@@ -401,6 +443,26 @@ def resolve_chain(task: str) -> list[str]:
     # had just failed. Visible in a live run as
     # "... -> groq:openai/gpt-oss-120b -> groq:openai/gpt-oss-120b -> ...".
     chain = list(dict.fromkeys([preferred, *FALLBACK_CHAIN]))
+
+    # The writer must not be graded by its own model, and FALLBACK_CHAIN's
+    # SECOND entry is exactly the critic's model -- so the first time the
+    # preferred writer failed, the chain landed on the critic and the
+    # independence silently collapsed. Two live corpus runs in a row
+    # reported "the writer answered on groq:openai/gpt-oss-120b, which is
+    # also the critic's model ... INCONCLUSIVE".
+    #
+    # Demote rather than drop. A self-graded rewrite still passes through
+    # _hard_check and beats refusing the user a rewrite, but it must be the
+    # LAST resort instead of the first fallback.
+    if task == "writing":
+        critic_model = TASK_MODELS.get("critique")
+        if critic_model in chain and len(chain) > 1:
+            chain = [m for m in chain if m != critic_model] + [critic_model]
+
+    # Before the key filter on purpose. Filtering here means the warning fires
+    # even when the excluded model has no key -- otherwise the misconfiguration
+    # stays invisible until the day someone pastes a key in.
+    chain = _drop_excluded(chain, task)
 
     usable = [m for m in chain if provider_for(m).configured]
     skipped = [m for m in chain if not provider_for(m).configured]

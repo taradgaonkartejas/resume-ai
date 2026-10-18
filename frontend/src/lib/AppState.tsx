@@ -40,10 +40,37 @@ export interface AppState {
   theme: Theme;
   modal: ModalName;
   zoom: number;
+  /**
+   * Target refs changed by an accepted suggestion in THIS sitting.
+   *
+   * Deliberately not persisted and deliberately not fetched. The question
+   * the highlight answers is "what did it just change?", which is about the
+   * last few clicks, not about the resume's whole history -- and nothing on
+   * the wire can answer it anyway: analysis rewrites are stored with
+   * session_id=None, so the session-scoped suggestion list does not see
+   * them, and VersionOut carries metadata without the snapshot needed to
+   * diff. Derived at the point of the accept instead, which covers both
+   * panes and costs no request.
+   */
+  changedRefs: string[];
+  /**
+   * The version cursor as it stood before this sitting's FIRST change.
+   *
+   * "Decline all changes" restores to exactly this, so the button reverts
+   * precisely what "Show changes" highlights — the two cannot disagree
+   * about what "the changes" are. Null until something changes.
+   */
+  baselineVersion: number | null;
+  /** "Show Changes". On after an accept so the result is visible, and
+   *  off-able so the preview does not stay permanently striped. */
+  showChanges: boolean;
 }
 
 export type Action =
   | { type: "setUser"; userId: string }
+  | { type: "markChanged"; refs: string[]; baseline?: number | null }
+  | { type: "setShowChanges"; on: boolean }
+  | { type: "clearChanges" }
   | { type: "openModal"; modal: ModalName }
   | { type: "closeModal" }
   | { type: "setZoom"; zoom: number }
@@ -67,8 +94,34 @@ function reducer(state: AppState, action: Action): AppState {
         activeUserId: action.userId,
         theme: nextTheme,
         modal: "none",
+        // Refs are positional (exp_0.bullet_0), so carrying them across a
+        // persona switch would highlight whatever happens to sit at that
+        // index in someone else's resume.
+        changedRefs: [],
+        showChanges: false,
+        baselineVersion: null,
       };
     }
+    case "markChanged": {
+      // Accepting the same ref twice must not grow the list, and an accept
+      // is the one moment the user definitely wants to see the result --
+      // so this is also what turns the toggle back on.
+      const merged = [...new Set([...state.changedRefs, ...action.refs])];
+      return {
+        ...state,
+        changedRefs: merged,
+        showChanges: true,
+        // Only the FIRST change sets the baseline. Later accepts in the
+        // same sitting must not move it forward, or Decline All would
+        // revert the last edit instead of all of them.
+        baselineVersion:
+          state.baselineVersion ?? (action.baseline ?? null),
+      };
+    }
+    case "setShowChanges":
+      return { ...state, showChanges: action.on };
+    case "clearChanges":
+      return { ...state, changedRefs: [], showChanges: false, baselineVersion: null };
     case "openModal":
       return { ...state, modal: action.modal };
     case "closeModal":
@@ -99,6 +152,9 @@ const initial: AppState = {
   theme: readTheme(bootUserId),
   modal: "none",
   zoom: 100,
+  changedRefs: [],
+  showChanges: false,
+  baselineVersion: null,
 };
 
 const StateCtx = createContext<AppState>(initial);

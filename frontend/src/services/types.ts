@@ -207,6 +207,15 @@ export interface ParseStatusOut {
   resume_id: string;
   parse_status: ParseStatus;
   parse_note: string;
+  /**
+   * Advisories about the uploaded FILE's machine-readability.
+   *
+   * Distinct from `parse_note`, which reports that reading failed. These
+   * accompany a SUCCESSFUL parse and say the reading may have been shaky —
+   * two columns, a scan, an unrecognised heading. None is a scored
+   * finding; the score is unaffected.
+   */
+  parse_advisories?: string[];
 }
 
 export interface DeleteOut {
@@ -253,7 +262,13 @@ export interface Finding {
   points: number;
   message: string;
   fix_hint: string;
-  /** "" | "rewrite" | "rerank" — which one-click action applies, if any. */
+  /** "" | "rewrite" | "rerank" | "quantify" — which one-click action
+   *  applies, if any.
+   *
+   *  `quantify` is NOT a rewrite. The two metric findings are cleared only
+   *  by a number the writer must never invent, so that path restructures
+   *  the line so a figure fits and leaves a literal `[__]` for the user.
+   *  Labelling it "Rewrite with AI" would promise the figure. */
   action: string;
   meta: Record<string, unknown>;
 }
@@ -283,6 +298,22 @@ export interface AnalysisStepsOut {
   max_score: number;
   points_available: number;
   steps: AnalysisStep[];
+  /**
+   * ScoringAgent prose, carried alongside the live steps.
+   *
+   * Generated and persisted on every analysis since the beginning, and read
+   * by no screen until now -- a model call per analysis whose output was
+   * thrown away.
+   */
+  commentary: Commentary;
+  /**
+   * True when the resume changed after that prose was written.
+   *
+   * The steps beside it are recomputed live, so the two CAN disagree, and
+   * the prose is the half that looks authoritative. Never present stale
+   * commentary as current -- stamp it.
+   */
+  commentary_stale: boolean;
 }
 
 /** Scoring categories. Every Finding belongs to exactly one. */
@@ -317,6 +348,20 @@ export interface AtsReview {
 export interface Commentary {
   headline: string;
   category_notes: Record<string, string>;
+  /**
+   * Per category, what the resume already does RIGHT.
+   *
+   * Rides on the same model call as `category_notes`, so it costs no extra
+   * tokens and cannot contradict the prose beside it. Optional because
+   * reports written before this field existed simply lack the key, and
+   * because the rule-engine fallback returns `{}` -- with no model there is
+   * nothing to praise with, and "this check passed" is not a strength.
+   *
+   * Already filtered server-side: a category scoring under half marks
+   * returns nothing, claims carrying unsourced numbers are dropped, and the
+   * list is capped at 3. Render what arrives; do not pad it.
+   */
+  strengths?: Record<string, string[]>;
 }
 
 export interface AnalysisOut {
@@ -336,8 +381,12 @@ export interface TailorIn {
   jd_title?: string;
   jd_content: string;
   /**
-   * Tailoring forks the resume by default, so the base stays pristine and one
-   * base can serve many applications. The session's `resume_id` is the CHILD.
+   * Tailoring edits the resume IN PLACE by default, so the Analysis and
+   * Tailor tabs always describe the same document.
+   *
+   * Set true to copy the resume first and keep a pristine base; then the
+   * session's `resume_id` is the CHILD and the caller must navigate to it.
+   * Either way, read the id off the session rather than assuming.
    */
   fork?: boolean;
 }
@@ -365,7 +414,16 @@ export type SuggestionAction = "accept" | "reject" | "edit";
  * pending -> "active" and accepted -> "matched". Conflating the two makes a
  * status check silently never match.
  */
-export type SuggestionStatus = "pending" | "accepted" | "rejected";
+/**
+ * `needs_input` is a QUESTION, not a draft: `suggested_text` is empty and
+ * there is nothing to accept until it has been answered. It is deliberately
+ * not terminal -- the user can still act on it.
+ */
+export type SuggestionStatus =
+  | "pending"
+  | "accepted"
+  | "rejected"
+  | "needs_input";
 
 export interface SuggestionOut {
   id: string;
@@ -385,6 +443,46 @@ export interface SuggestionOut {
   grounded: boolean;
   critic_notes: string;
   revisions: number;
+
+  /* ---------- clarifying question (PLAN-8 Inc 6) ---------- */
+  /** Non-empty only while `status === "needs_input"`. */
+  question: string;
+  /** What the user typed, verbatim. The audit record of the attestation. */
+  answer: string;
+  /**
+   * This rests on a fact the USER supplied, not on resume text.
+   *
+   * Stays true after answering, which is how a card whose status has moved
+   * on to `pending` keeps showing "you told us this". Deliberately separate
+   * from `grounded` (= supported by existing resume text), which is set
+   * false on these: collapsing the two would launder an attestation into a
+   * verified fact.
+   */
+  attested: boolean;
+  /**
+   * A bare "Yes" is not enough. True when the job description attached a
+   * duration to the keyword -- pressing a button cannot attest "3+ years".
+   */
+  requires_text: boolean;
+
+  /**
+   * What accepting this does to the RESUME score -- the same currency the
+   * Analysis tab prints, so the two tabs are comparable.
+   *
+   * Usually 0: most keyword swaps are score-neutral, and saying so is more
+   * honest than hiding it. Should never be negative -- the review gate
+   * rejects drafts that introduce a finding -- so a negative value means
+   * that gate has a hole and the UI will show it rather than hide it.
+   */
+  score_delta: number;
+  /**
+   * The resume text this was written against has since changed.
+   *
+   * Accepting it would overwrite newer work, so the backend refuses with a
+   * 409. That refusal used to be the FIRST the user heard of it, after
+   * reading the card and clicking Accept. Now the card knows up front.
+   */
+  is_stale: boolean;
 }
 
 export interface SuggestionBuckets {
@@ -415,6 +513,23 @@ export interface ChatReplyOut {
   message: ChatMessageOut;
   suggestion: SuggestionOut | null;
   tokens_left: number;
+}
+
+/** One suggestion the bulk accept declined to apply, and why. */
+export interface SkippedSuggestion {
+  id: string;
+  /** "stale" | "needs_input" | "empty" | "missing_target" | "over_limit" */
+  reason: string;
+}
+
+export interface AcceptAllOut {
+  applied: string[];
+  applied_count: number;
+  skipped: SkippedSuggestion[];
+  skipped_count: number;
+  /** The cursor BEFORE the batch — the seq "Decline all" restores to. */
+  undo_to_version: number;
+  version_cursor: number;
 }
 
 /* ---------- versions ---------- */

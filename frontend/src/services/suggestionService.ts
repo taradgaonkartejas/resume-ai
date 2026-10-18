@@ -1,5 +1,5 @@
 import { http } from "@/api/client";
-import type { SuggestionOut } from "./types";
+import type { AcceptAllOut, SuggestionOut } from "./types";
 
 /**
  * Mirrors backend/app/api/suggestions.py — one route, three actions.
@@ -17,6 +17,23 @@ export const suggestionService = {
   /** PATCH /api/suggestions/{id} {"action":"reject"} */
   reject: (suggestionId: string) =>
     http.patch<SuggestionOut>(`/suggestions/${suggestionId}`, { action: "reject" }),
+
+  /**
+   * POST /api/suggestions/{id}/answer
+   *
+   * Resolves a `needs_input` card. Returns 200 whether the user attested
+   * (card becomes `pending`) or declined (card becomes `rejected`) --
+   * declining is a normal outcome, not an error. 422 is reserved for a bare
+   * confirm on a question that needs text.
+   *
+   * `confirmed` is the bare Yes button and is only accepted when
+   * `requires_text` is false.
+   */
+  answer: (suggestionId: string, body: { answer?: string; confirmed?: boolean }) =>
+    http.post<SuggestionOut>(`/suggestions/${suggestionId}/answer`, {
+      answer: body.answer ?? "",
+      confirmed: body.confirmed ?? false,
+    }),
 
   /**
    * PATCH /api/suggestions/{id} {"action":"edit", "edited_text": "..."}
@@ -50,6 +67,21 @@ export const suggestionService = {
       `/resumes/${resumeId}/sections/${encodeURIComponent(targetRef)}/rewrite`,
       { finding_id: opts.findingId ?? "", regenerate: opts.regenerate ?? false },
     ),
+
+  /**
+   * POST /api/resumes/{id}/suggestions/accept-all
+   *
+   * Applies every applicable pending suggestion as ONE version, so one undo
+   * puts the whole batch back. Stale suggestions and unanswered questions
+   * are skipped and named in `skipped`, never forced.
+   *
+   * `sessionId` scopes it to one tailoring run; omit it in the Analysis
+   * pane, where the rows carry `session_id: null`.
+   */
+  acceptAll: (resumeId: string, sessionId?: string | null) =>
+    http.post<AcceptAllOut>(`/resumes/${resumeId}/suggestions/accept-all`, {
+      session_id: sessionId ?? null,
+    }),
 };
 
 /** The text actually applied: the user's edit when present, else the LLM's

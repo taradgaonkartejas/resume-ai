@@ -265,6 +265,131 @@ def _extract_pdf(content: bytes) -> str:
 
 
 
+#: Headings that look like section headings but match no known label.
+#: Taleo in particular ignores content under a heading it does not
+#: recognise, so "My Journey" can cost a candidate their whole work history.
+_HEADINGish = re.compile(r"^[A-Z][A-Za-z &/'-]{2,38}$")
+
+
+def collect_parse_facts(filename: str, content: bytes, raw_text: str) -> dict:
+    """What we observed while reading the user's file.
+
+    Facts about the UPLOAD, not about the resume's content. The scorer
+    deliberately grades only content -- layout is a property of the template
+    and is fixed in the exporter rather than nagged about -- but that
+    reasoning covers documents WE render. It says nothing about the file the
+    user handed us, which the exporter never saw and cannot repair.
+
+    This is the missing half, and it is the direct follow-up to the parser
+    bugs: two real resumes produced phantom schools and wrapped-line extras,
+    and nothing anywhere told the user the reading had been shaky. These
+    facts are advisory. Nothing here becomes a scored finding, so the
+    finding ids and every `Δscore == points` assertion are untouched.
+
+    Never raises. A fact we could not collect is simply absent -- failing an
+    upload to compute an advisory would be an absurd trade.
+    """
+    facts: dict = {}
+    text = raw_text or ""
+    suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    facts["format"] = suffix or "unknown"
+    facts["chars"] = len(text.strip())
+
+    if suffix == "pdf":
+        try:
+            import pdfplumber
+
+            with pdfplumber.open(io.BytesIO(content)) as doc:
+                pages = doc.pages
+                facts["pages"] = len(pages)
+                multi = sum(1 for pg in pages if _column_split_x(pg) is not None)
+                facts["multi_column_pages"] = multi
+                # An image-only (scanned) PDF has pages but no text layer.
+                # No mainstream ATS runs OCR, so the recruiter receives an
+                # empty profile -- the single most destructive failure here.
+                facts["image_only"] = bool(pages) and facts["chars"] < 40
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("parse facts: pdf inspection failed: %s", exc)
+    elif suffix == "docx":
+        try:
+            import docx
+
+            document = docx.Document(io.BytesIO(content))
+            facts["tables"] = len(document.tables)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("parse facts: docx inspection failed: %s", exc)
+
+    known = {label for aliases in _SECTION_HEADS.values() for label in aliases}
+    unknown: list[str] = []
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        stripped = line.strip().rstrip(":")
+        if not stripped or len(stripped.split()) > 4:
+            continue
+        if not _HEADINGish.match(stripped):
+            continue
+        if stripped.lower() in known:
+            continue
+        # A heading-shaped line is usually NOT a heading. "Jane Doe" and
+        # "Acme Corp" match the same shape, and an early version of this
+        # reported the candidate's own name as an unrecognised section --
+        # advice that is both wrong and alarming.
+        #
+        # Two cheap signals separate a real section label from a name: it
+        # is set off by blank lines on both sides, and it is not in the
+        # contact block at the top of the page.
+        if i < 3:
+            continue
+        before_blank = not lines[i - 1].strip()
+        after_blank = i + 1 >= len(lines) or not lines[i + 1].strip()
+        if not (before_blank and after_blank):
+            continue
+        unknown.append(stripped)
+    facts["unknown_headings"] = unknown[:6]
+    return facts
+
+
+def parse_advisories(facts: dict) -> list[str]:
+    """Human sentences for the facts worth telling the user about.
+
+    Ordered worst-first. Returns [] for a clean parse, which is the common
+    case -- an advisory shown on every upload is an advisory nobody reads.
+    """
+    if not facts:
+        return []
+    out: list[str] = []
+
+    if facts.get("image_only"):
+        out.append(
+            "This PDF looks like a scan or an image — there is almost no "
+            "selectable text in it. No mainstream ATS runs OCR, so a "
+            "recruiter's system would receive an empty profile. Export a "
+            "text-based PDF from your editor rather than scanning a printout."
+        )
+    if facts.get("multi_column_pages"):
+        out.append(
+            f"{facts['multi_column_pages']} page(s) use a two-column layout. "
+            "We read the columns separately, but many parsers read straight "
+            "across and interleave them. A single-column layout is the "
+            "safest thing you can do for machine readability."
+        )
+    if facts.get("tables"):
+        out.append(
+            f"This DOCX uses {facts['tables']} table(s) for layout. We read "
+            "the cells, but older parsers drop table content entirely — it is "
+            "a common way for a whole skills section to vanish."
+        )
+    if facts.get("unknown_headings"):
+        labels = ", ".join(f"\u201c{h}\u201d" for h in facts["unknown_headings"][:3])
+        out.append(
+            f"Unrecognised section heading(s): {labels}. Taleo and similar "
+            "parsers ignore content under a heading they do not know. "
+            "Standard labels (Experience, Education, Skills) are read by "
+            "everything."
+        )
+    return out
+
+
 def extract_text(filename: str, content: bytes) -> str:
     suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if suffix == "pdf":
@@ -329,6 +454,68 @@ def _grade_value(kind: str, value: str) -> str:
     if value.endswith("%"):
         return value
     return f"{kind.strip().upper() if len(kind) <= 4 else kind.strip().title()} {value}"
+
+
+# A line carrying nothing but a grade VALUE, with no "Score:" / "CGPA:" label
+# in front of it. Resumes very often put the number on its own line:
+#
+#     Post Graduate Diploma in Advanced Computing (PG-DAC) | CDAC, Pune  2024
+#     73%
+#
+# `_GRADE_RE` needs the label, so a bare "73%" fell through to header parsing
+# and became a SCHOOL CALLED "73%" -- a row that reaches the export, so a
+# resume sent to an employer listed a percentage as an institution.
+#
+# Deliberately narrow. A bare integer is not accepted: "2024" on its own line
+# is a date, and treating it as a grade would be the same bug pointing the
+# other way. Only forms that cannot be anything but a grade qualify.
+_BARE_GRADE_RE = re.compile(
+    r"^(?:"
+    r"\d{1,3}(?:\.\d+)?\s*%"          # 73%   67.85%
+    r"|\d{1,2}(?:\.\d+)?\s*/\s*\d{1,2}(?:\.\d+)?"  # 7.79/10
+    r")[.,;]?$"
+)
+
+
+def _is_only_grade(line: str) -> bool:
+    """True for a line that carries nothing but an unlabelled grade."""
+    return bool(_BARE_GRADE_RE.match(line.strip()))
+
+
+def _merge_wrapped(lines: list[str]) -> list[str]:
+    """Rejoin lines a PDF broke mid-sentence.
+
+    The extras sections had no continuation handling at all -- every line
+    became its own entry -- so
+
+        • Founder, Kalarpan (2019-present) - Founded and run a charity
+        through staged theatrical performances; own everything from ...
+
+    produced a second "achievement" whose title was the tail of the first.
+
+    The lowercase test is the conservative half of `_is_bullet_continuation`,
+    used on its own here because extras entries have no bullet list to
+    reason about. A line that opens lowercase did not start a new thought.
+    """
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or _BULLET_RE.match(stripped) or not out:
+            out.append(line)
+            continue
+        previous = out[-1].rstrip()
+        # Opens lowercase -- did not start a new thought.
+        wrapped = bool(stripped[0].islower())
+        # Or the PREVIOUS line ended mid-list. No heading has ever followed a
+        # line ending in a comma, so this catches the wrap the lowercase test
+        # cannot: "... Texephyr'19, Credenz'18," / "Gandharv'19, Innovation'19."
+        if previous.endswith((",", ";", "-", "\u2013", "\u2014", "&", "/")):
+            wrapped = True
+        if wrapped:
+            out[-1] = f"{previous} {stripped}"
+            continue
+        out.append(line)
+    return out
 
 
 def _split_date_tail(header: str) -> tuple[str, str]:
@@ -650,7 +837,7 @@ def structure_text(raw: str) -> dict:
     # heading at end of file.
     data["extras"] = [
         {"kind": x["kind"], "title": x["title"],
-         "entries": [_extra_entry(ln) for ln in x["lines"]]}
+         "entries": [_extra_entry(ln) for ln in _merge_wrapped(x["lines"])]}
         for x in extras_raw if x["lines"]
     ]
 
@@ -675,6 +862,33 @@ def structure_text(raw: str) -> dict:
             # A wrapped bullet rejoins the bullet it came from.
             if _is_bullet_continuation(line, entry):
                 entry["bullets"][-1] = f"{entry['bullets'][-1]} {line.strip()}"
+                continue
+
+            # A PRODUCT / PROJECT SUBTITLE under the header is not a second
+            # employer. Real resumes write
+            #
+            #     Software Engineer | Ceinsys Tech Ltd.    Apr 2024 - Present
+            #     Scan to Model (S2M) - global point-cloud platform for ...
+            #     - Architected a RabbitMQ-based pipeline ...
+            #
+            # and the subtitle's dash was read as a company/role separator,
+            # so it became a new entry and -- having no bullets of its own
+            # yet -- silently REPLACED the real one, taking the dates with
+            # it. The tell is that the open entry has collected no bullets
+            # and this line carries no dates of its own: an employer change
+            # without a single bullet in between does not happen.
+            stripped_line = line.strip()
+            if (
+                entry is not None
+                and not entry["bullets"]
+                and (entry["company"] or entry["role"])
+                and not _split_date_tail(stripped_line)[1]
+            ):
+                # Keep the text -- it describes the work -- but as content,
+                # not as an employer. There is no description field on an
+                # entry, and discarding a line the candidate wrote is worse
+                # than filing it one level down.
+                entry["bullets"].append(stripped_line)
                 continue
 
             if entry is not None and entry["bullets"]:
@@ -726,6 +940,10 @@ def structure_text(raw: str) -> dict:
         grade = _GRADE_RE.match(text)
         if grade and edu_entry is not None:
             edu_entry["grade"] = _grade_value(grade.group(1), grade.group(2))
+            continue
+        # ... and the same line with no label in front of it.
+        if edu_entry is not None and _is_only_grade(text):
+            edu_entry["grade"] = text.rstrip(".,;")
             continue
 
         pieces: list[str] = []
@@ -838,6 +1056,7 @@ class ParsingService:
         raw = extract_text(filename, content)
         note = _extraction_failure(filename, raw)
         resume.raw_text = raw
+        resume.parse_facts = collect_parse_facts(filename, content, raw)
         if note:
             resume.structured_data = empty_resume()
             resume.parse_status = "failed"
@@ -865,6 +1084,7 @@ class ParsingService:
             filename = resume.storage_key.rsplit("/", 1)[-1]
             raw = extract_text(filename, content)
             resume.raw_text = raw
+            resume.parse_facts = collect_parse_facts(filename, content, raw)
             # pypdf returns "" for image-only pages and raises nothing, so a
             # scanned resume used to land as parse_status="ready" holding an
             # empty document. The user then saw a near-zero ATS score and no

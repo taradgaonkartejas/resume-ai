@@ -67,11 +67,28 @@ def test_generated_suggestions_are_all_grounded(client, priya):
     ).json()
 
     data = client.get(f"/api/resumes/{resume_id}", headers=headers).json()["structured_data"]
-    for suggestion in buckets["active"]:
+
+    # DRAFTS must be grounded. The one exception is stated below rather than
+    # quietly filtered out, because "every suggestion is grounded" stopped
+    # being true the day clarifying questions landed and an invariant that
+    # silently narrows is worse than one that is explicit about its edges.
+    drafts = [s for s in buckets["active"] if s["status"] == "pending"]
+    assert drafts, "tailoring produced no drafts to check"
+    for suggestion in drafts:
         assert suggestion["grounded"] is True
         assert resume_ops.exists(data, suggestion["target_ref"])
         # original_text must match the resume verbatim
         assert resume_ops.resolve(data, suggestion["target_ref"]) == suggestion["original_text"]
+
+    # QUESTIONS are deliberately NOT grounded -- the resume holds no evidence
+    # for them, which is the entire reason they are being asked. Asserting it
+    # here keeps the exception visible to anyone reading the grounding rules,
+    # and fails loudly if a question ever starts claiming to be grounded.
+    for question in [s for s in buckets["active"] if s["status"] == "needs_input"]:
+        assert question["grounded"] is False
+        assert question["attested"] is False
+        assert question["suggested_text"] == ""
+        assert question["target_ref"] == ""
 
 
 def test_accept_fails_when_target_vanishes(client, priya):
@@ -83,8 +100,9 @@ def test_accept_fails_when_target_vanishes(client, priya):
         headers=headers,
         json={"jd_title": "SRE", "jd_content": "Terraform Prometheus GitOps AWS"},
     ).json()
-    # Tailoring forks: the suggestions belong to the child, so the section
-    # must be stripped from the CHILD for this test to exercise the guard.
+    # Read the working id off the session rather than assuming: tailoring
+    # is in place by default now, but this test only cares that the section
+    # is stripped from whichever resume the suggestions belong to.
     working_id = session["resume_id"]
     buckets = client.get(
         f"/api/resumes/{working_id}/tailor/{session['id']}/suggestions",

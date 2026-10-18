@@ -511,15 +511,106 @@ def test_list_includes_score_and_kind(client, priya, priya_resume):
     assert isinstance(scored["overall_score"], int)
 
 
-def test_tailoring_forks_by_default(client, priya, priya_resume):
+def test_tailoring_is_in_place_by_default(client, priya, priya_resume):
+    """The Analysis and Tailor tabs must describe the same document.
+
+    This assertion is the inverse of what it used to be. Forking by default
+    meant the session pointed at a CHILD while the Analysis tab stayed on
+    the resume in the URL, so accepting a tailor suggestion appeared to do
+    nothing: the two tabs were editing different rows.
+    """
+    session = client.post(
+        f"/api/resumes/{priya_resume}/tailor",
+        headers={"X-User-Id": priya},
+        json={"jd_title": "SRE at Globex", "jd_content": "Terraform Kubernetes AWS"},
+    ).json()
+
+    assert session["resume_id"] == priya_resume, "tailoring forked instead of editing in place"
+
+
+def test_an_accepted_tailor_edit_is_visible_to_analysis(client, priya):
+    """The bug as the user hits it, end to end.
+
+    Matching ids is necessary but not sufficient -- what actually broke was
+    that accepted text never reached the document the other tab reads. So
+    accept a suggestion and re-read the resume by the id the Analysis tab
+    holds, which is the one the request was made against.
+
+    The resume and JD are shaped to yield deterministic keyword-match
+    suggestions, so this runs without a provider key. A test that skips in
+    CI would not have caught the regression it exists for.
+    """
+    headers = {"X-User-Id": priya}
+    made = client.post("/api/resumes", json={"title": "Sync probe"}, headers=headers).json()
+    resume_id = made["id"]
+    client.put(
+        f"/api/resumes/{resume_id}/data",
+        json={
+            "structured_data": {
+                "contact": {"name": "Jane Doe", "email": "jane@example.com"},
+                "summary": {"text": "Platform engineer with eight years of experience."},
+                "experience": [
+                    {
+                        "company": "Acme Corp",
+                        "role": "Senior Engineer",
+                        "dates": "2020-2024",
+                        "bullets": [
+                            "Built Terraform modules adopted by 8 teams.",
+                            "Led the platform migration.",
+                        ],
+                    }
+                ],
+                "skills": [{"label": "Platform", "items": ["Terraform", "AWS"]}],
+                "education": [],
+                "projects": [],
+            }
+        },
+        headers=headers,
+    )
+    before = client.get(f"/api/resumes/{resume_id}", headers=headers).json()
+
+    session = client.post(
+        f"/api/resumes/{resume_id}/tailor",
+        headers=headers,
+        json={
+            "jd_title": "SRE",
+            "jd_content": "Kubernetes Terraform AWS observability on-call",
+        },
+    ).json()
+    assert session["resume_id"] == resume_id
+
+    active = client.get(
+        f"/api/resumes/{resume_id}/tailor/{session['id']}/suggestions",
+        headers=headers,
+    ).json()["active"]
+    target = next((s for s in active if s["status"] == "pending"), None)
+    assert target is not None, "fixture needs a pending suggestion"
+
+    accepted = client.patch(
+        f"/api/suggestions/{target['id']}", json={"action": "accept"}, headers=headers
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["status"] == "accepted"
+
+    after = client.get(f"/api/resumes/{resume_id}", headers=headers).json()
+    assert after["structured_data"] != before["structured_data"], (
+        "the accepted edit never reached the resume the Analysis tab reads"
+    )
+
+
+def test_tailoring_can_still_fork_on_request(client, priya, priya_resume):
+    """Forking is opt-in now, not gone -- the machinery is still live."""
     headers = {"X-User-Id": priya}
     session = client.post(
         f"/api/resumes/{priya_resume}/tailor",
         headers=headers,
-        json={"jd_title": "SRE at Globex", "jd_content": "Terraform Kubernetes AWS"},
+        json={
+            "jd_title": "SRE at Globex",
+            "jd_content": "Terraform Kubernetes",
+            "fork": True,
+        },
     ).json()
-
-    assert session["resume_id"] != priya_resume, "tailoring mutated the base"
+    assert session["resume_id"] != priya_resume
 
     child = client.get(f"/api/resumes/{session['resume_id']}", headers=headers).json()
     assert child["kind"] == "tailored"
@@ -527,13 +618,20 @@ def test_tailoring_forks_by_default(client, priya, priya_resume):
     assert child["parent_id"] == priya_resume
 
 
-def test_tailoring_can_opt_out_of_forking(client, priya, priya_resume):
-    session = client.post(
+def test_forking_still_leaves_the_base_untouched(client, priya, priya_resume):
+    """The guarantee fork exists for, kept under test now that it is opt-in.
+
+    An opt-in path with no coverage rots quietly.
+    """
+    headers = {"X-User-Id": priya}
+    base_before = client.get(f"/api/resumes/{priya_resume}", headers=headers).json()
+    client.post(
         f"/api/resumes/{priya_resume}/tailor",
-        headers={"X-User-Id": priya},
-        json={"jd_content": "Terraform Kubernetes", "fork": False},
-    ).json()
-    assert session["resume_id"] == priya_resume
+        headers=headers,
+        json={"jd_content": "Terraform Kubernetes", "fork": True},
+    )
+    base_after = client.get(f"/api/resumes/{priya_resume}", headers=headers).json()
+    assert base_after["structured_data"] == base_before["structured_data"]
 
 
 # ------------------------------------------------- analysis prose reaches the client

@@ -7,7 +7,12 @@ from app.repositories.analysis_repository import AnalysisRepository
 from app.repositories.resume_repository import ResumeRepository
 from app.repositories.vector_repository import VectorRepository
 from app.services.exceptions import NotFoundError, ResumeNotFound, ResumeNotReady
-from app.services.heuristics import build_steps, infer_role_tags, score_resume
+from app.services.heuristics import (
+    build_steps,
+    data_fingerprint,
+    infer_role_tags,
+    score_resume,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +69,13 @@ class AnalysisService:
         data = resume.structured_data or {}
 
         result, role_tags, trace = self._run_graph(data, user_id)
+
+        # Record WHAT this commentary was written about. The prose in `trace`
+        # describes this exact snapshot; the findings shown beside it are
+        # recomputed live. Without this the UI cannot tell the user their
+        # "Overall Assessment" is describing a resume they have since edited.
+        # `trace` is a JSON column, so this costs no migration.
+        trace = {**trace, "data_fingerprint": data_fingerprint(data)}
 
         report = self.analyses.create(
             resume_id=resume.id,
@@ -150,6 +162,19 @@ class AnalysisService:
         data = resume.structured_data or {}
         scored = score_resume(data)
         steps = build_steps(data, scored)
+
+        # The LLM commentary rides along with the live steps.
+        #
+        # It was already being computed, persisted and returned by GET
+        # /analysis -- and no component ever rendered it, so we have been
+        # paying for a model call per analysis and discarding the output.
+        # The guided editor is the one screen where per-category advice is
+        # actually useful, and it is the screen that never had it.
+        #
+        # It is a SNAPSHOT riding next to LIVE findings, so it ships with its
+        # own staleness flag rather than pretending to be current.
+        commentary, stale = self._commentary_for(resume.id, data)
+
         return {
             "resume_id": resume.id,
             "overall_score": scored["overall_score"],
@@ -157,4 +182,31 @@ class AnalysisService:
             # Total honest headroom the guided flow can still recover.
             "points_available": sum(s["points_available"] for s in steps),
             "steps": steps,
+            "commentary": commentary,
+            "commentary_stale": stale,
         }
+
+    def _commentary_for(self, resume_id: uuid.UUID, data: dict) -> tuple[dict, bool]:
+        """Latest stored commentary, plus whether the resume moved under it.
+
+        Three states, kept distinct on purpose:
+
+          no report / no prose  -> ({}, False)   nothing to show, nothing to warn about
+          fingerprint matches   -> (prose, False) provably describes this text
+          fingerprint differs   -> (prose, True)  provably out of date
+
+        A report written before fingerprints existed has no way to prove
+        either, and is reported as stale. That is the safe direction: an
+        unnecessary "from your last analysis" note costs the user nothing,
+        whereas silently presenting stale prose as current is the exact
+        failure this flag exists to prevent.
+        """
+        report = self.analyses.latest_for_resume(resume_id)
+        if report is None:
+            return {}, False
+        trace = report.trace or {}
+        commentary = trace.get("commentary") or {}
+        if not isinstance(commentary, dict) or not commentary:
+            return {}, False
+        recorded = trace.get("data_fingerprint")
+        return commentary, recorded != data_fingerprint(data)

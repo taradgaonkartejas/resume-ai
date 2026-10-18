@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowLeft, FileUp, LayoutTemplate, Loader2, Minus, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { UserSwitcher } from "@/app/UserSwitcher";
@@ -12,8 +12,15 @@ import { TailorModal } from "@/features/tailor/TailorModal";
 import { useSearchParams } from "react-router-dom";
 import { useAppDispatch, useAppState, type LeftTab } from "@/lib/AppState";
 import { useNav, useResumeIdParam } from "@/app/nav";
-import { useResume, useResumes, useTemplates } from "@/api/queries";
+import {
+  useParseStatus,
+  useResume,
+  useResumes,
+  useRestoreVersion,
+  useTemplates,
+} from "@/api/queries";
 import { emptyResume } from "@/services";
+import { cn } from "cn";
 
 /**
  * The resume editor.
@@ -24,7 +31,8 @@ import { emptyResume } from "@/services";
  * The centre chat pane is the remaining increment.
  */
 export function Workspace() {
-  const { activeUserId, modal, zoom } = useAppState();
+  const { activeUserId, modal, zoom, changedRefs, showChanges, baselineVersion } =
+    useAppState();
   const dispatch = useAppDispatch();
   const nav = useNav();
   const routeResumeId = useResumeIdParam();
@@ -47,7 +55,18 @@ export function Workspace() {
   // Fall back to the user's most recent resume so a refresh does not dump you
   // back on the empty state.
   const resumeId = routeResumeId ?? resumes?.[0]?.id ?? null;
+  const restore = useRestoreVersion(resumeId);
+  // Only polls while a parse is in flight; once ready it is a single read.
+  const { data: parse } = useParseStatus(resumeId, Boolean(resumeId));
+  const advisories = parse?.parse_advisories ?? [];
   const { data: resume, isLoading: resumeLoading } = useResume(resumeId);
+
+  // Refs are positional -- exp_0.bullet_0 means "whatever is at that index".
+  // Carrying them to another resume would highlight an unrelated line, so
+  // the set is dropped whenever the document changes.
+  useEffect(() => {
+    dispatch({ type: "clearChanges" });
+  }, [resumeId, dispatch]);
 
   const { data: templates } = useTemplates();
   const [tailorOpen, setTailorOpen] = useState(false);
@@ -82,6 +101,40 @@ export function Workspace() {
           <span className="rounded-full border border-warning px-2 py-0.5 text-[11px] font-medium text-warning">
             parse failed
           </span>
+        )}
+
+        {/* A SUCCESSFUL parse that may still have dropped something.
+            Separate from "parse failed", which means we got nothing at
+            all. Advisory only -- it never moves the score, because the
+            problem is in the file the user uploaded rather than in the
+            resume's content. Rendered only when there is something to
+            say; a banner on every upload is a banner nobody reads. */}
+        {resume?.parse_status === "ready" && advisories.length > 0 && (
+          <details className="group">
+            <summary
+              className="cursor-pointer list-none rounded-full border border-warning/60
+                         px-2 py-0.5 text-[11px] font-medium text-warning
+                         hover:bg-warning/10"
+              title="How machine-readable the file you uploaded was"
+            >
+              {advisories.length} readability note
+              {advisories.length === 1 ? "" : "s"}
+            </summary>
+            <ul
+              className="absolute z-20 mt-1 max-w-md space-y-1.5 rounded-lg border
+                         border-line-soft bg-surface-2 p-2.5 text-[11px] leading-relaxed
+                         text-content-muted shadow-lg"
+            >
+              {advisories.map((line) => (
+                <li key={line} className="flex gap-1.5">
+                  <span className="text-warning" aria-hidden>
+                    •
+                  </span>
+                  <span>{line}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
         )}
 
         <div className="ml-auto flex items-center gap-2">
@@ -173,6 +226,55 @@ export function Workspace() {
             >
               {activeTemplateName}
             </button>
+            {/* Only once there is something to show. A toggle that is always
+                visible but usually inert invites the click that does
+                nothing. */}
+            {changedRefs.length > 0 && (
+              <button
+                onClick={() => dispatch({ type: "setShowChanges", on: !showChanges })}
+                aria-pressed={showChanges}
+                title="Highlight text changed by accepted suggestions in this session"
+                className={cn(
+                  "rounded-full border px-2 py-0.5 text-[11px] transition-colors",
+                  showChanges
+                    ? "border-transparent bg-mark text-on-mark"
+                    : "border-line-soft text-content-muted hover:border-brand-text hover:text-content",
+                )}
+              >
+                {showChanges ? "Hide changes" : "Show changes"}
+                <span className="ml-1 tabular-nums opacity-70">
+                  {changedRefs.length}
+                </span>
+              </button>
+            )}
+            {/* Decline = revert, and revert is undo. This restores the
+                cursor to where it stood before the first of the changes
+                currently highlighted, so the button undoes exactly what
+                "Show changes" is pointing at. Hidden unless we actually
+                captured a baseline, because reverting to a guess is worse
+                than offering nothing. */}
+            {changedRefs.length > 0 && baselineVersion !== null && (
+              <button
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      `Undo ${changedRefs.length} accepted change` +
+                        `${changedRefs.length === 1 ? "" : "s"} and restore the ` +
+                        "resume to how it was before? You can redo this.",
+                    )
+                  ) {
+                    restore.mutate(baselineVersion);
+                  }
+                }}
+                disabled={restore.isPending}
+                title="Revert every change accepted in this session"
+                className="rounded-full border border-line-soft px-2 py-0.5 text-[11px]
+                           text-content-muted transition-colors hover:border-reject-text
+                           hover:text-reject-text disabled:opacity-60"
+              >
+                {restore.isPending ? "Reverting…" : "Decline all"}
+              </button>
+            )}
             <div className="ml-auto flex items-center gap-1">
               <button
                 aria-label="Zoom out"
@@ -200,7 +302,13 @@ export function Workspace() {
                 <Loader2 className="size-6 animate-spin text-brand-text" aria-hidden />
               </div>
             ) : (
-              <ResumePreview data={data} tokens={activeTokens} zoom={zoom} />
+              <ResumePreview
+                data={data}
+                tokens={activeTokens}
+                zoom={zoom}
+                changedRefs={changedRefs}
+                showChanges={showChanges}
+              />
             )}
           </div>
         </section>
@@ -226,10 +334,12 @@ export function Workspace() {
         onOpenChange={setTailorOpen}
         resumeId={resumeId}
         resumeTitle={resume?.title ?? "this resume"}
-        onStarted={(childId) => {
-          // Tailoring forked: move to the CHILD, otherwise the user keeps
-          // editing the untouched base and wonders why nothing changed.
-          nav.workspace(childId, "tailor");
+        onStarted={(workingId) => {
+          // Normally the same resume we are already on, so this just opens
+          // the Tailor tab. It is still driven by the returned id so that
+          // `fork: true` would navigate to the child instead of stranding
+          // the user on the untouched base.
+          nav.workspace(workingId, "tailor");
         }}
       />
     </div>

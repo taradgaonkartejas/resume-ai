@@ -102,8 +102,9 @@ def resume_service(
     templates: Annotated[TemplateRepository, Depends(template_repo)],
     vectors: Annotated[VectorRepository, Depends(vector_repo)],
     versions: Annotated[VersionService, Depends(version_service)],
+    suggestions: Annotated[SuggestionRepository, Depends(suggestion_repo)],
 ) -> ResumeService:
-    return ResumeService(resumes, templates, vectors, versions)
+    return ResumeService(resumes, templates, vectors, versions, suggestions)
 
 
 def parsing_service(

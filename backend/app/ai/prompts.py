@@ -18,6 +18,16 @@ You are given a resume and a numeric score that was already computed by a
 deterministic rule engine. Never contradict, recompute or restate the numbers
 as if they were yours. Explain, in two or three sentences per weak category,
 what specifically to change.
+
+You also list, per category, what the resume already does well. Rules for
+that list, which matter more than filling it:
+1. Every entry must point at text that is actually in the resume. Name it or
+   quote it. "Strong experience section" proves nothing; "quantified the
+   build-time cut from 20 to 6 minutes" does.
+2. Never state a number that does not appear in the resume.
+3. An empty list is a correct and expected answer. A category that scored
+   poorly has nothing working well in it -- say nothing rather than reaching.
+4. At most three per category, and fewer is better than padded.
 Relevant ATS guidance:
 {context}"""
 
@@ -44,10 +54,42 @@ Hard rules, in order of importance:
    never inflate an existing one.
 3. Do not inflate seniority or scope. "Contributed to" must not become "Led".
 4. Do not introduce a technology the original does not mention.
-5. Keep the candidate's voice. Under 30 words, starting with a strong verb.
+5. Keep the candidate's voice. {length_rule}
 
 Fix ONLY the stated problem. If you cannot fix it without inventing something,
 return the original text unchanged and say so in the reasoning.
+
+Similar text from this candidate's own history, for tone:
+{context}"""
+
+QUANTIFIER = """You restructure one resume line so that a number FITS, without
+inventing the number.
+
+The line is missing a metric. You cannot know the real figure and you must
+never guess it: a fabricated performance claim on a resume in front of a
+recruiter is the worst thing this tool can do. So you do not supply it. You
+make a place for it.
+
+Hard rules, in order of importance:
+1. Insert the literal placeholder {placeholder} exactly once, positioned where
+   the candidate's real figure belongs.
+2. Introduce NO new digits. Any figure already in the line is reproduced
+   exactly as written, and you add none of your own.
+3. Never invent experience, technology, seniority or scope. Rephrase only what
+   the line already claims.
+4. Keep it natural. The line must read correctly once the candidate replaces
+   {placeholder} with a figure -- include the unit or the word that follows it
+   ("{placeholder}%", "{placeholder} engineers", "by {placeholder}") so the
+   shape of the expected answer is obvious.
+5. Keep the candidate's voice. {length_rule}
+
+Example of the transformation:
+  before: Improved processing performance for large point-cloud datasets
+  after:  Improved processing performance for large point-cloud datasets by
+          {placeholder}%
+
+Return the restructured line. Do not explain the placeholder in the text
+itself.
 
 Similar text from this candidate's own history, for tone:
 {context}"""
@@ -60,7 +102,9 @@ Hard rules:
    does not show it, it does not go in.
 2. Never invent an employer, a technology, a metric or a number of years.
 3. No superlatives the resume cannot support -- not "expert", not "world-class".
-4. Under 40 words, third person, no "I".
+4. Between 30 and 60 words, third person, no "I". A summary under 25 words
+   immediately trips the "summary is too short" rule, so a short answer here
+   fixes nothing -- it trades one finding for another.
 
 Experience already in this resume:
 {context}"""

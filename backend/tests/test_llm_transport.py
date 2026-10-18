@@ -331,27 +331,42 @@ def test_prose_only_is_read_for_a_schema_that_opts_in(keyed, chain, monkeypatch)
     assert verdict.approved is False
 
 
-def test_prose_only_fails_closed_for_a_schema_without_from_prose(
+def test_prose_preamble_is_still_refused_now_that_from_prose_exists(
     keyed, chain, monkeypatch
 ):
-    """The diffusiongemma failure, encoded.
+    """The diffusiongemma failure, encoded -- and the condition it imposed.
 
-    A model that writes good prose but cannot emit JSON produced `unparsable`
-    on every writer case, because RevisionDraft has no `from_prose()`. Adding
-    one naively is the wrong fix: that model's decline replies mix rule
-    commentary ("...which violates Rule 1") into the text, and a reader taking
-    the whole reply as `suggested_text` would paste that into a resume.
+    This test used to assert RevisionDraft had NO `from_prose()`, with the
+    note: "If RevisionDraft gains from_prose(), it must detect refusals
+    FIRST. Delete this guard deliberately, not incidentally."
+
+    It has now gained one, because `nvidia:meta/muse-glimmer-30b` failed all
+    ten writer-corpus cases with good prose rewrites that were discarded for
+    not being JSON, collapsing the chain onto the critic's own model.
+
+    So this is the deliberate replacement, keeping the condition. The guard
+    was right: the first version of `from_prose` accepted the exact string
+    below, which would have pasted "Here is a better bullet:" into a resume.
     """
-    assert not callable(getattr(RevisionDraft, "from_prose", None)), (
-        "If RevisionDraft gains from_prose(), it must detect refusals FIRST. "
-        "Delete this guard deliberately, not incidentally."
-    )
+    assert callable(getattr(RevisionDraft, "from_prose", None))
     _install(
         monkeypatch,
         {"*": {"parsed": None, "raw": _Response("Here is a better bullet: Led X.")}},
     )
     with pytest.raises(llm.LLMUnavailable):
         llm.structured("writing", "sys", "usr", RevisionDraft)
+
+
+def test_a_clean_prose_rewrite_is_now_recovered_instead_of_lost(
+    keyed, chain, monkeypatch
+):
+    """The counterpart: the case that used to be a total loss."""
+    answer = "Reduced CI pipeline runtime from 22 minutes to 9 minutes."
+    _install(monkeypatch, {"*": {"parsed": None, "raw": _Response(answer)}})
+    draft, result = llm.structured("writing", "sys", "usr", RevisionDraft)
+    assert result.status == "ok-prose"
+    assert draft.suggested_text == answer
+    assert draft.reasoning == ""
 
 
 def test_an_empty_reply_is_a_failure_not_a_success(keyed, chain, monkeypatch):

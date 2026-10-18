@@ -27,8 +27,13 @@ def start_tailoring(
 ):
     """Start a tailoring session.
 
-    By default this FORKS the resume: the returned session's resume_id is the
-    new child, so the client should navigate to it. The base is untouched.
+    By default this edits the resume IN PLACE: the returned session's
+    resume_id is the resume that was passed in, so Analysis and Tailor stay
+    pointed at one document.
+
+    Pass fork=true to copy the resume first; then resume_id is the new child
+    and the client must navigate to it. Either way, read the id off the
+    session rather than assuming -- that is what makes both modes work.
     """
     return svc.start(
         resume_id,

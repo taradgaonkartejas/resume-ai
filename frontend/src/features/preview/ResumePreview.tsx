@@ -8,6 +8,16 @@ import { dateLabel } from "@/lib/dates";
 import { educationLines, experienceLines } from "@/lib/entries";
 import { hrefFor, labelLinks } from "@/lib/links";
 import { cn } from "cn";
+import { useMemo } from "react";
+import {
+  EDUCATION_FIELDS,
+  SUMMARY_REF,
+  educationRef,
+  experienceBulletRef,
+  isChanged,
+  projectBulletRef,
+  skillsRef,
+} from "@/features/preview/changeRefs";
 
 /**
  * Renders structured_data as an A4-proportioned page.
@@ -37,6 +47,19 @@ const DENSITY: Record<DesignTokens["density"], { gap: string; leading: string }>
   normal: { gap: "mt-3", leading: "leading-normal" },
   airy: { gap: "mt-4", leading: "leading-relaxed" },
 };
+
+/**
+ * A changed range.
+ *
+ * `--color-mark` (#D1CDFF), never yellow -- the palette forbids it, and on a
+ * white page yellow reads as a highlighter pen rather than a diff. Rendered
+ * as a real <mark> so the meaning survives for screen readers and for print,
+ * with the browser's default background overridden because it IS yellow.
+ */
+function Marked({ on, children }: { on: boolean; children: React.ReactNode }) {
+  if (!on) return <>{children}</>;
+  return <mark className="rounded-[2px] bg-mark px-0.5 text-on-mark">{children}</mark>;
+}
 
 function SectionHeading({ title, tokens }: { title: string; tokens: DesignTokens }) {
   const label = tokens.caps ? title.toUpperCase() : title;
@@ -137,18 +160,28 @@ function Entry({
   primary,
   secondary,
   dates,
+  marked = false,
 }: {
   primary: string;
   secondary?: string;
   dates?: string;
+  /** Mark the whole entry -- used where several addressable fields are
+   *  merged into one display string. */
+  marked?: boolean;
 }) {
   return (
     <>
       <div className="flex items-baseline justify-between gap-3">
-        <p className="text-[10.5px] font-semibold">{primary}</p>
+        <p className="text-[10.5px] font-semibold">
+          <Marked on={marked}>{primary}</Marked>
+        </p>
         {dates && <p className="shrink-0 text-[9px] text-paper-muted">{dates}</p>}
       </div>
-      {secondary && <p className="text-[9.5px] italic text-paper-muted">{secondary}</p>}
+      {secondary && (
+        <p className="text-[9.5px] italic text-paper-muted">
+          <Marked on={marked}>{secondary}</Marked>
+        </p>
+      )}
     </>
   );
 }
@@ -187,14 +220,24 @@ export function ResumePreview({
   tokens: tokensProp,
   zoom = 100,
   className,
+  changedRefs,
+  showChanges = false,
 }: {
   data: StructuredData;
   /** From the chosen TemplateOut. Falls back to the backend's defaults. */
   tokens?: DesignTokens;
   zoom?: number;
   className?: string;
+  /** Target refs to mark as changed. Same spelling as resume_ops. */
+  changedRefs?: readonly string[];
+  /** The "Show Changes" toggle. Off means no marks at all. */
+  showChanges?: boolean;
 }) {
   const tokens: DesignTokens = { ...DEFAULT_DESIGN_TOKENS, ...(tokensProp ?? {}) };
+  // Built once per render rather than per bullet: a 30-bullet resume would
+  // otherwise rebuild the Set 30 times.
+  const marked = useMemo(() => new Set(changedRefs ?? []), [changedRefs]);
+  const mark = (ref: string) => isChanged(ref, marked, showChanges);
   const { contact, summary, experience, projects, education, skills } = data;
   // Sections with at least one entry that renders to something. Mirrors
   // resume_ops.visible_extras: an empty heading is worse than no heading,
@@ -304,7 +347,9 @@ export function ResumePreview({
 
             {summary.text && (
               <Section title="Summary" tokens={tokens}>
-                <p className={bullet}>{summary.text}</p>
+                <p className={bullet}>
+                  <Marked on={mark(SUMMARY_REF)}>{summary.text}</Marked>
+                </p>
               </Section>
             )}
 
@@ -322,7 +367,7 @@ export function ResumePreview({
                     <ul className="mt-0.5 list-disc space-y-0.5 pl-3.5">
                       {job.bullets.map((b, j) => (
                         <li key={j} className={bullet}>
-                          {b}
+                          <Marked on={mark(experienceBulletRef(i, j))}>{b}</Marked>
                         </li>
                       ))}
                     </ul>
@@ -340,7 +385,7 @@ export function ResumePreview({
                     <ul className="mt-0.5 list-disc space-y-0.5 pl-3.5">
                       {p.bullets.map((b, j) => (
                         <li key={j} className={bullet}>
-                          {b}
+                          <Marked on={mark(projectBulletRef(i, j))}>{b}</Marked>
                         </li>
                       ))}
                     </ul>
@@ -353,10 +398,17 @@ export function ResumePreview({
               <Section title="Education" tokens={tokens}>
                 {education.map((e, i) => (
                   <div key={i} className={i > 0 ? "mt-1.5" : undefined}>
+                    {/* educationLines() merges several addressable fields
+                        into two display strings, so a per-field highlight
+                        would have to re-derive which substring came from
+                        which field. The entry is marked as a whole if ANY
+                        of its fields changed -- coarser, but it never
+                        points at the wrong text. */}
                     <Entry
                       dates={dateLabel(e)}
                       primary={educationLines(e)[0]}
                       secondary={educationLines(e)[1] || undefined}
+                      marked={EDUCATION_FIELDS.some((f) => mark(educationRef(i, f)))}
                     />
                   </div>
                 ))}
@@ -371,7 +423,11 @@ export function ResumePreview({
                       <p className="text-[9.5px] font-semibold">{g.label}</p>
                     )}
                     {columns === 1 ? (
-                      <p className={bullet}>{g.items.join(", ")}</p>
+                      <p className={bullet}>
+                        {/* skills.N.items addresses the whole group, so the
+                            whole joined line is the changed range */}
+                        <Marked on={mark(skillsRef(i))}>{g.items.join(", ")}</Marked>
+                      </p>
                     ) : (
                       <ul
                         className="list-disc pl-3.5"
@@ -381,7 +437,7 @@ export function ResumePreview({
                       >
                         {g.items.map((item, j) => (
                           <li key={j} className={bullet}>
-                            {item}
+                            <Marked on={mark(skillsRef(i))}>{item}</Marked>
                           </li>
                         ))}
                       </ul>

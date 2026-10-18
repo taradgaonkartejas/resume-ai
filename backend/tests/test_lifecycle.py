@@ -43,11 +43,27 @@ def _start(client, headers, resume_id):
     return session, buckets, working_id
 
 
+def _first_draft(buckets: dict) -> dict:
+    """The first ACCEPTABLE card.
+
+    `active` holds open items, which since PLAN-8 Inc 6 means clarifying
+    questions as well as drafts -- and questions sort first, because they
+    are the ones that can raise the match percent for a skill the resume
+    cannot evidence. A question has no suggested_text, so accepting or
+    editing one is a 422 by design.
+    """
+    drafts = [s for s in buckets["active"] if s["status"] == "pending"]
+    assert drafts, "no draft suggestions to exercise the lifecycle with"
+    return drafts[0]
+
+
 def test_accept_applies_text_and_bumps_version(client, priya):
     resume_id = new_resume(client, priya, "Lifecycle", RESUME)
     headers = {"X-User-Id": priya}
     _, buckets, resume_id = _start(client, headers, resume_id)
-    suggestion = buckets["active"][0]
+    # Questions lead `active` and have no draft to accept or edit;
+    # this test is about the draft lifecycle.
+    suggestion = _first_draft(buckets)
 
     before = client.get(f"/api/resumes/{resume_id}", headers=headers).json()
     client.patch(
@@ -64,7 +80,9 @@ def test_reject_leaves_resume_untouched(client, priya):
     resume_id = new_resume(client, priya, "Lifecycle", RESUME)
     headers = {"X-User-Id": priya}
     _, buckets, resume_id = _start(client, headers, resume_id)
-    suggestion = buckets["active"][0]
+    # Questions lead `active` and have no draft to accept or edit;
+    # this test is about the draft lifecycle.
+    suggestion = _first_draft(buckets)
 
     before = client.get(f"/api/resumes/{resume_id}", headers=headers).json()
     client.patch(
@@ -80,7 +98,9 @@ def test_edit_then_accept_applies_edited_text(client, priya):
     resume_id = new_resume(client, priya, "Lifecycle", RESUME)
     headers = {"X-User-Id": priya}
     _, buckets, resume_id = _start(client, headers, resume_id)
-    suggestion = buckets["active"][0]
+    # Questions lead `active` and have no draft to accept or edit;
+    # this test is about the draft lifecycle.
+    suggestion = _first_draft(buckets)
 
     custom = "Completely custom replacement text."
     client.patch(
@@ -100,7 +120,9 @@ def test_double_accept_is_rejected(client, priya):
     resume_id = new_resume(client, priya, "Lifecycle", RESUME)
     headers = {"X-User-Id": priya}
     _, buckets, resume_id = _start(client, headers, resume_id)
-    suggestion = buckets["active"][0]
+    # Questions lead `active` and have no draft to accept or edit;
+    # this test is about the draft lifecycle.
+    suggestion = _first_draft(buckets)
 
     first = client.patch(
         f"/api/suggestions/{suggestion['id']}", headers=headers, json={"action": "accept"}

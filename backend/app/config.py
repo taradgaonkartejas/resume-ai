@@ -100,26 +100,30 @@ class Settings(BaseSettings):
     # json_schema -- and `RevisionDraft` has no `from_prose()`, so it has no
     # salvage rung if the model cannot do schemas. Confirm with
     # `make writer-report-llm` before trusting this for real work.
-    # 2026-10-11, SECOND change today and this one is the USER'S CHOICE over
-    # a recorded objection: the writer payload is the resume itself -- real
-    # name, phone, address, employers, dates -- and codecraft names no
-    # upstream provider, so where that data lands is unknowable. The user was
-    # told this plainly and chose it anyway; it is their document.
+    # 2026-10-11, FOURTH change. muse-glimmer is OUT on two live runs that
+    # produced ZERO usable writer calls between them:
     #
-    # Technically unverified too: codecraft advertises `json_mode`, not
-    # `json_schema`, and RevisionDraft has no from_prose() salvage rung.
-    # Run `make models-gen-all codecraft` (the probe now tests a real schema)
-    # and then `make writer-report-llm` before relying on this.
+    #   run 1  every case `unparsable` -- it cannot emit JSON. The payloads
+    #          were correct rewrites, which is why RevisionDraft.from_prose()
+    #          was added, to recover that shape in general.
+    #   run 2  every case `timeout` -- it did not answer at all.
     #
-    # Previous value, measured good and kept as the documented fallback:
-    #   nvidia:meta/muse-glimmer-30b   5.2s, 21 words, 0 defects
+    # Two different failure modes, zero successes. It was only ever chosen
+    # off a PROSE-ONLY probe that predated _probe_structured(), so it had
+    # never once completed the call the application actually makes. Picking
+    # it was my error, twice over: the "5.2s / 0 defects" was a prose probe,
+    # and the "7/7" quoted beside it was a different model's corpus score.
     #
-    # On picking the id: codecraft's free plan meters TOKENS, not money, and
-    # this project uses ~25% of the monthly allowance. The per-token price
-    # tier is therefore irrelevant -- a $8.30 model and a $0.12 model consume
-    # the allowance identically. Choose on `make writer-report-llm` results
-    # alone, and do not infer capability from the name; several ids in that
-    # catalogue are not products the vendor they cite ships.
+    # codecraft:claude-sonnet-5 is the only writer with real corpus evidence:
+    # it answered all ten cases -- 6/7 fixed, 5/7 reaching the user, 3/3
+    # resisted inventing, 0 fabrications. The fixed probe also ranked it
+    # fastest of the 33 (4.2s) with a clean json_schema re-test.
+    #
+    # Known cost, accepted deliberately: in the corpus run it averaged ~6k
+    # tokens per call against codecraft's 1M/month, so heavy use will exhaust
+    # the allowance. That now degrades honestly instead of looking like a
+    # broken model -- 402 classifies as `quota_exhausted` and the chain falls
+    # through to groq/nvidia.
     model_writing: str = "codecraft:claude-sonnet-5"
     model_chat: str = "groq:openai/gpt-oss-120b"
     model_critique: str = "groq:openai/gpt-oss-120b"

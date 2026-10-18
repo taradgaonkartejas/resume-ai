@@ -11,3 +11,6 @@ data/
 
 # Local SQLite fallback databases.
 *.db
+
+/.env
+/frontend/.env

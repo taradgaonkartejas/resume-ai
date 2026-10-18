@@ -436,8 +436,38 @@ def main() -> int:
         if not provider.configured:
             print(f"{name}: no key")
             return 2
-        free = sorted(provider.free_models or ())
-        print(f"\n--- {name}: real generation on {len(free)} free model(s) ---")
+        # free_models is a hand-maintained ALLOWLIST, for providers where only
+        # part of the catalogue is free (nvidia). When the free plan covers
+        # everything there is no allowlist to maintain, and the list of models
+        # to probe is simply the catalogue -- already fetched above.
+        #
+        # Reading only free_models missed that second case completely:
+        # codecraft declares free_covers_catalogue=True with an empty
+        # allowlist, so this probed ZERO models and then printed "No model of
+        # this provider can generate inside the budget" -- which reads as a
+        # damning verdict on the provider and was really a bug here. The same
+        # session's writer-report-llm had all ten cases answered by codecraft,
+        # which is the contradiction that exposed it.
+        if provider.free_covers_catalogue:
+            free = sorted(listed.get(name, set()))
+            source = "whole catalogue is free"
+            if not free:
+                print(f"\n{name}: catalogue unavailable, so there is nothing "
+                      "to probe. That is a listing failure, NOT a verdict on "
+                      "the provider -- see the catalogue error above.")
+                return 2
+        else:
+            free = sorted(provider.free_models or ())
+            source = "hand-maintained free allowlist"
+            if not free:
+                print(f"\n{name}: no free allowlist is declared for this "
+                      "provider, so there is nothing to probe. Populate "
+                      f"PROVIDERS[{name!r}].free_models or set "
+                      "free_covers_catalogue. This is a config gap, NOT a "
+                      "verdict on the provider.")
+                return 2
+        print(f"\n--- {name}: real generation on {len(free)} free model(s) "
+              f"({source}) ---")
         print(f"    budget {settings.llm_timeout_seconds}s, no max_tokens, "
               "same call the app makes\n"
               "    each OK model is then re-tested with a json_schema "

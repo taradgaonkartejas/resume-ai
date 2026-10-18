@@ -14,6 +14,8 @@ To keep the invariant true, each scorer computes `points` as
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import asdict, dataclass, field
 
@@ -129,7 +131,7 @@ class Finding:
     message: str
     fix_hint: str
     # Populated for findings the user can act on with one click.
-    action: str = ""  # "" | "rewrite" | "rerank"
+    action: str = ""  # "" | "rewrite" | "rerank" | "quantify"
     meta: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -227,12 +229,16 @@ def _score_summary(data: dict) -> tuple[int, list[Finding]]:
             severity=_sev(6), points=6,
             message="Summary has no quantified achievement",
             fix_hint="Add a real number — team size, users served, latency cut.",
-            # No AI action, deliberately. The writer corpus marks this exact
-            # finding must-decline and every report scores the refusal as a
-            # success: inventing a metric that is not in the resume is
-            # fabrication. Advertising "Improve with AI" here promised a fix
-            # the system is built never to give, and spent two server-side
-            # model calls to answer 422. The number has to come from the user.
+            # `quantify`, NOT `rewrite`. The number still has to come from the
+            # user -- inventing a metric is the one thing this system must
+            # never do, and the writer corpus marks this finding must-decline.
+            #
+            # What changed is that refusing is no longer the only honest
+            # answer. The writer restructures the line so a figure FITS and
+            # leaves a visible [__] for the user to fill in, which asserts
+            # nothing. A plain `rewrite` here would still promise a fix the
+            # system is built never to give.
+            action="quantify",
         ))
 
     # Whole-word, not substring: "Fulfilled orders" used to earn action-verb
@@ -299,7 +305,9 @@ def _score_experience(data: dict) -> tuple[int, list[Finding]]:
             points=18 - metric_award,
             message=f"Only {with_metrics} of {len(bullets)} bullets are quantified",
             fix_hint="Add the number you moved: %, time saved, revenue, scale.",
-            # Also no AI action -- same reason as summary.no_metric above.
+            # Same mechanism as summary.no_metric above: restructure for a
+            # metric, never supply one.
+            action="quantify",
             meta={"quantified": with_metrics, "total": len(bullets)},
         ))
 
@@ -476,6 +484,10 @@ def _score_ats(data: dict, findings: list[Finding]) -> int:
             message="Experience is not newest-first",
             fix_hint="Most parsers take your current employer to be the first "
                      "entry. Order roles newest first.",
+            # The only finding whose fix is a pure reordering, so it gets the
+            # third action branch. Until this was set it told the user to
+            # reorder their roles and offered no control that could do it.
+            action="rerank",
         ))
     else:
         points += 1
@@ -553,6 +565,28 @@ def score_resume(data: dict) -> dict:
         "category_scores": categories,
         "findings": [f.to_dict() for f in all_findings],
     }
+
+
+def data_fingerprint(data: dict) -> str:
+    """A stable hash of the resume content an analysis was written against.
+
+    The LLM commentary in an AnalysisReport is PROSE ABOUT A SNAPSHOT, while
+    the findings beside it are recomputed live on every request. The moment
+    the user edits a bullet the two disagree, and the prose is the half that
+    looks authoritative -- a paragraph reading "the summary leans on generic
+    filler" above zero findings, because the filler was just removed, reads
+    as the product being broken.
+
+    Comparing scores cannot detect this: a reword that changes no finding
+    leaves the score identical while making the prose wrong. So hash the
+    content itself.
+
+    Stored inside `trace`, which is a JSON column, so this needs no migration
+    and no DB reset. Reports written before this existed have no fingerprint
+    and are reported as unknown rather than guessed at.
+    """
+    canonical = json.dumps(data, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
 def build_steps(data: dict, scored: dict | None = None) -> list[dict]:

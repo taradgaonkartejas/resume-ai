@@ -12,6 +12,7 @@ import {
   tailorService,
   templateService,
   userService,
+  versionService,
   type ChatHistoryOut,
   type ChatMessageOut,
   type ResumeOut,
@@ -20,6 +21,7 @@ import {
   type TailorSessionOut,
 } from "@/services";
 import { ApiError } from "@/api/client";
+import { useAppDispatch } from "@/lib/AppState";
 
 /**
  * React Query bindings.
@@ -301,12 +303,136 @@ export function useStartTailoring(
  */
 export function useSuggestionAction(resumeId: string | null, sessionId: string | null) {
   const qc = useQueryClient();
+  const dispatch = useAppDispatch();
   return useMutation({
     mutationFn: ({ id, action, editedText }: SuggestionActionVars) => {
       if (action === "accept") return suggestionService.accept(id);
       if (action === "reject") return suggestionService.reject(id);
       return suggestionService.edit(id, editedText ?? "");
     },
+    // Read BEFORE the request. By onSuccess the resume query may already
+    // have been refetched, and the cursor we need is the one from before
+    // this accept -- that is what Decline All restores to.
+    onMutate: () => {
+      if (!resumeId) return { baseline: null };
+      const cached = qc.getQueryData<ResumeOut>(keys.resume(resumeId));
+      return { baseline: cached?.version_cursor ?? null };
+    },
+    onSuccess: (updated, vars, ctx) => {
+      // Only `accept` writes to structured_data -- `edit` stores edited_text
+      // and `reject` only moves status, so neither changes the preview.
+      //
+      // The ref comes off the SERVER's response rather than being
+      // reconstructed here. The preview matches on exact string, and the
+      // one bug this class of code has already produced was a hand-built
+      // ref the resolver did not recognise.
+      //
+      // This lives in the hook, not at the call sites, for the same reason
+      // the invalidation set does: SuggestionCard is shared by the analysis
+      // and tailor panes and the chat pane uses it too, and three copies of
+      // this rule would drift.
+      if (vars.action === "accept" && updated?.target_ref) {
+        dispatch({
+          type: "markChanged",
+          refs: [updated.target_ref],
+          baseline: ctx?.baseline ?? null,
+        });
+      }
+      if (sessionId) qc.invalidateQueries({ queryKey: keys.suggestions(sessionId) });
+      if (resumeId) {
+        qc.invalidateQueries({ queryKey: keys.resume(resumeId) });
+        qc.invalidateQueries({ queryKey: keys.analysis(resumeId) });
+        qc.invalidateQueries({ queryKey: keys.versions(resumeId) });
+        qc.invalidateQueries({ queryKey: keys.tailor(resumeId) });
+      }
+      qc.invalidateQueries({ queryKey: keys.resumes });
+    },
+  });
+}
+
+/**
+ * Document-level Accept All.
+ *
+ * The whole batch is one version on the server, so the undo that follows is
+ * a single press. `undo_to_version` comes back from the response rather
+ * than being inferred here — the client should never have to guess which
+ * version "before" was.
+ */
+export function useAcceptAll(resumeId: string | null, sessionId: string | null) {
+  const qc = useQueryClient();
+  const dispatch = useAppDispatch();
+  return useMutation({
+    mutationFn: () => {
+      if (!resumeId) throw new Error("no resume");
+      return suggestionService.acceptAll(resumeId, sessionId);
+    },
+    onSuccess: (result) => {
+      if (result.applied.length) {
+        dispatch({
+          type: "markChanged",
+          refs: result.applied,
+          baseline: result.undo_to_version,
+        });
+      }
+      if (sessionId) qc.invalidateQueries({ queryKey: keys.suggestions(sessionId) });
+      if (resumeId) {
+        qc.invalidateQueries({ queryKey: keys.resume(resumeId) });
+        qc.invalidateQueries({ queryKey: keys.analysis(resumeId) });
+        qc.invalidateQueries({ queryKey: keys.versions(resumeId) });
+        qc.invalidateQueries({ queryKey: keys.tailor(resumeId) });
+      }
+      qc.invalidateQueries({ queryKey: keys.resumes });
+    },
+  });
+}
+
+/**
+ * Document-level Decline All — restore the cursor to the sitting's baseline.
+ *
+ * Deliberately the same cursor undo uses. The highlights are cleared on
+ * success because the changes they point at no longer exist.
+ */
+export function useRestoreVersion(resumeId: string | null) {
+  const qc = useQueryClient();
+  const dispatch = useAppDispatch();
+  return useMutation({
+    mutationFn: (seq: number) => {
+      if (!resumeId) throw new Error("no resume");
+      return versionService.restore(resumeId, seq);
+    },
+    onSuccess: () => {
+      dispatch({ type: "clearChanges" });
+      if (resumeId) {
+        qc.invalidateQueries({ queryKey: keys.resume(resumeId) });
+        qc.invalidateQueries({ queryKey: keys.analysis(resumeId) });
+        qc.invalidateQueries({ queryKey: keys.versions(resumeId) });
+        qc.invalidateQueries({ queryKey: keys.tailor(resumeId) });
+      }
+      qc.invalidateQueries({ queryKey: keys.resumes });
+    },
+  });
+}
+
+/**
+ * Answering a clarifying question.
+ *
+ * Shares the invalidation set with useSuggestionAction rather than defining
+ * its own: an answer can move the card to `pending` OR to `rejected`, and
+ * both change the same lists the accept path changes. Two hooks with
+ * drifting invalidation sets is how a card ends up stale in one tab only.
+ */
+export function useAnswerQuestion(resumeId: string | null, sessionId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      answer,
+      confirmed,
+    }: {
+      id: string;
+      answer?: string;
+      confirmed?: boolean;
+    }) => suggestionService.answer(id, { answer, confirmed }),
     onSuccess: () => {
       if (sessionId) qc.invalidateQueries({ queryKey: keys.suggestions(sessionId) });
       if (resumeId) {
@@ -347,6 +473,27 @@ export function useRewriteSection(resumeId: string | null) {
       // lists need refreshing; invalidating analysis here would re-render the
       // whole stepper under the user mid-read.
       if (resumeId) qc.invalidateQueries({ queryKey: keys.tailor(resumeId) });
+    },
+  });
+}
+
+/**
+ * Reorder a section. Unlike a rewrite this lands in the resume immediately,
+ * so -- unlike useRewriteSection -- the analysis DOES need invalidating: the
+ * score has actually moved and the finding is gone.
+ */
+export function useRerankSection(resumeId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (targetRef: string) => {
+      if (!resumeId) throw new Error("No resume selected");
+      return resumeService.rerankSection(resumeId, targetRef);
+    },
+    onSuccess: () => {
+      if (!resumeId) return;
+      qc.invalidateQueries({ queryKey: keys.resume(resumeId) });
+      qc.invalidateQueries({ queryKey: keys.analysisSteps(resumeId) });
+      qc.invalidateQueries({ queryKey: keys.versions(resumeId) });
     },
   });
 }

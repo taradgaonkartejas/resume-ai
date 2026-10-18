@@ -61,6 +61,38 @@ class VersionService:
         self.resumes.db.commit()
         return resume
 
+    def restore(self, resume_id: uuid.UUID, user_id: uuid.UUID, seq: int) -> Resume:
+        """Move the cursor to ``seq``. Multi-step undo, nothing more.
+
+        This is what "Decline Changes" at document level means. Declining
+        after the edits are already applied is a *revert*, and revert is
+        `undo` -- which already exists, already snapshots, and already has a
+        cursor. A second history for the document-level buttons would be two
+        mechanisms disagreeing about what the resume used to be.
+
+        So this deliberately does NOT record a new version. It does what
+        pressing undo repeatedly does, in one call, and redo still walks
+        forward afterwards.
+
+        Restoring to the current cursor is a no-op rather than an error: the
+        UI can offer Decline All without first working out whether anything
+        is there to decline.
+        """
+        resume = self._owned(resume_id, user_id)
+        if seq == resume.version_cursor:
+            return resume
+        if seq < 1 or seq > self.versions.max_seq(resume_id):
+            raise InvalidStateTransition(
+                f"No version {seq} for this resume"
+            )
+        version = self.versions.get_by_seq(resume_id, seq)
+        if version is None:
+            raise InvalidStateTransition(f"No version {seq} for this resume")
+        resume.structured_data = version.snapshot
+        resume.version_cursor = seq
+        self.resumes.db.commit()
+        return resume
+
     def redo(self, resume_id: uuid.UUID, user_id: uuid.UUID) -> Resume:
         resume = self._owned(resume_id, user_id)
         target = resume.version_cursor + 1

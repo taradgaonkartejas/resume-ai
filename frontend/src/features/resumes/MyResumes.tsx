@@ -48,9 +48,9 @@ function timeAgo(iso: string): string {
 /**
  * My Resumes — the app's home screen.
  *
- * Every resume, base or tailored, is a card. Tailoring FORKS a new row
- * server-side, which is what lets one base resume serve many applications
- * while staying pristine.
+ * Every resume, base or tailored, is a card. Tailoring edits a resume in
+ * place by default, so it stays one card; tailored rows exist for the
+ * explicit fork path, where one base serves many applications.
  */
 export function MyResumes() {
   const { activeUserId } = useAppState();
@@ -413,10 +413,11 @@ export function MyResumes() {
         onOpenChange={(open) => !open && setTailorFor(null)}
         resumeId={tailorFor?.id ?? null}
         resumeTitle={tailorFor?.title ?? "this resume"}
-        onStarted={(childId) => {
+        onStarted={(workingId) => {
           setTailorFor(null);
-          // Land on the CHILD the fork created, with its suggestions open.
-          nav.workspace(childId, "tailor");
+          // Land on whichever resume the session is bound to, suggestions
+          // open: the same one for in-place, the child if it forked.
+          nav.workspace(workingId, "tailor");
         }}
       />
     </div>
