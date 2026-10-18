@@ -19,11 +19,48 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 
-from app.services import ats
+from app.services import ats, quality_rules
 from app.services.resume_ops import date_label, to_plain_text
 from app.services.text_match import canonical_aliases, contains, count_hits
 
 WEIGHTS = {"contact": 15, "summary": 20, "experience": 45, "format": 20}
+
+# Every check that can award points, and what it is worth.
+#
+# This exists because of Part 3. `WEIGHTS` sums to 100 and `Δscore == points`
+# is asserted in three places, so a NEW scored finding cannot add to the
+# total -- it must take its points from inside its own category. The six
+# Tier 1 writing-quality checks therefore re-sliced `summary` and
+# `experience` rather than extending them:
+#
+#   summary     length 8 -> 6, action_verb 6 -> 5, freeing 3 for filler
+#   experience  base 10 -> 6, metric 18 -> 15, action_verb 12 -> 9,
+#               dates 5 -> 3, freeing 12 for the five bullet-quality checks
+#
+# Scores computed before this change will move. That is a release note, not
+# a bug.
+#
+# The scorers read these numbers instead of repeating them, and
+# `test_score_budgets.py` asserts each category sums to its weight -- the
+# guard Part 3 called for, which did not exist while the budgets were
+# literals scattered through the file.
+SUB_BUDGETS: dict[str, dict[str, int]] = {
+    "contact": {
+        "name": 4, "phone": 3, "location": 2, "email": 4, "links": 2,
+    },
+    "summary": {
+        "length": 6, "metric": 6, "action_verb": 5, "filler": 3,
+    },
+    "experience": {
+        "base": 6, "metric": 15, "action_verb": 9, "dates": 3,
+        "filler": 3, "impossible_metric": 3, "first_person": 2,
+        "repeated_opener": 2, "tense_mismatch": 2,
+    },
+    "format": {
+        "skills": 4, "education": 3, "length": 5, "bullet_length": 4,
+        "ats_dates": 2, "ats_glyphs": 1, "ats_order": 1,
+    },
+}
 
 # Two different numbers on purpose, and now stated in one place instead of
 # contradicting each other across heuristics.py, corpora.py and prompts.py:
@@ -88,7 +125,34 @@ _ACTION_VERBS_PARTICIPLE = {
     "running", "training",
 }
 
+# Present-tense forms, added when Part 3 introduced `experience.tense_mismatch`.
+# Without them a bullet reading "Manage a team of five" was penalised TWICE
+# for one defect: once by `weak_verbs` ("does not start with an action verb",
+# which is false -- "Manage" is an action verb) and again by the new tense
+# rule. Worse, in a CURRENT role, where present tense is correct, only the
+# false accusation fired. Each rule now owns exactly one thing: this set
+# decides whether the opener is a strong verb, and the tense rule decides
+# whether it is in the right tense.
 ACTION_VERBS = _ACTION_VERBS_PAST | _ACTION_VERBS_PARTICIPLE
+
+# Present-tense verbs are credited ONLY as the first word of a bullet, never
+# anywhere in a summary.
+#
+# Part 3 introduced `experience.tense_mismatch`, and without present-tense
+# forms a bullet reading "Manage a team of five" was penalised TWICE for one
+# defect: once by `weak_verbs` ("does not start with an action verb", which
+# is false -- "Manage" IS an action verb) and again by the tense rule. In a
+# CURRENT role, where present tense is correct, only the false accusation
+# fired.
+#
+# Merging them into ACTION_VERBS outright was wrong, and a test caught it:
+# the summary check asks `contains(text, verb)` over the WHOLE string, so
+# "engineer" as a verb credited every resume reading "Platform engineer".
+# Most present-tense verbs are also common nouns -- design, lead, monitor,
+# support, review, scale, partner, test, work. At position 0 of a bullet
+# they are unambiguously verbs; mid-sentence they are not. So the wider set
+# is used only where position does the disambiguating.
+BULLET_OPENER_VERBS = ACTION_VERBS | quality_rules.PRESENT_TENSE_OPENERS
 
 # A number only counts as quantification when something is actually being
 # measured. The old pattern included a bare `\b\d{2,}\b`, so "shipped it in
@@ -97,17 +161,84 @@ ACTION_VERBS = _ACTION_VERBS_PAST | _ACTION_VERBS_PARTICIPLE
 # are explicitly excluded from the number+noun branch.
 _METRIC_RE = re.compile(
     r"""(
-          \d+(?:\.\d+)?\s*%                       # 40%   3.5 %
-        | [$£€]\s?\d                              # $1.2M
-        | \b\d+(?:\.\d+)?\s*[kmb]\b               # 40k   1.2M
-        | \bx\s?\d+(?:\.\d+)?\b                   # x3
-        | \b\d+(?:\.\d+)?\s?x\b                   # 3x
-        | \b\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|seconds|min|mins|minutes
+          \d+(?:\.\d+)?\+?\s*%                       # 40%   3.5 %   20+%
+        | [$£€]\s?\d                                 # $1.2M
+        | \b\d+(?:\.\d+)?\+?\s*[kmb]\b               # 40k   1.2M   10k+
+        | \bx\s?\d+(?:\.\d+)?\b                      # x3
+        | \b\d+(?:\.\d+)?\s?x\b                      # 3x
+        | \b\d+(?:\.\d+)?\+?\s*(?:ms|s|sec|secs|seconds|min|mins|minutes
                               |hr|hrs|hours|days|weeks|months|years)\b
-        | \b(?!(?:19|20)\d{2}\b)\d+(?:\.\d+)?\s+\w+   # 8 teams, 40 services
+        | \b(?!(?:19|20)\d{2}\b)\d+(?:\.\d+)?\+?\s+\w+   # 8 teams, 10+ engineers
     )""",
     re.IGNORECASE | re.VERBOSE,
 )
+# --- tenure is not an achievement -------------------------------------------
+#
+# "5+ years of experience" is the most common opening line in a resume
+# summary, and widening _METRIC_RE to accept the N+ form made it satisfy
+# summary.no_metric on every resume in the corpus at once -- the finding
+# stopped firing not because the summaries improved but because they all
+# state a duration.
+#
+# The resolution is not to pick a side. Tenure and achievement are two
+# different signals that happen to look alike to a regex:
+#
+#   * To an ATS, tenure is a SCREENING FIELD. Workday, Taleo, SuccessFactors
+#     and iCIMS parse years-of-experience and compare it against the
+#     requisition's stated minimum, and recruiters filter on it directly. A
+#     summary that omits it can be screened out before a human reads a word,
+#     so the number earns its place and must never be flagged as clutter.
+#
+#   * To the human reading the shortlist at an MNC, tenure is an INPUT, not an
+#     outcome. "4+ years of Java" reports that time passed. The summary is
+#     three lines of prime real estate and the question it must answer is
+#     "what moved" -- percent, money, time, scale.
+#
+# So tenure keeps matching _METRIC_RE everywhere else (an experience bullet
+# reading "2+ years leading the migration" is still quantified), and only the
+# summary's achievement test runs against the text with tenure spans removed.
+_TENURE_RE = re.compile(
+    r"""\b
+    (?:over|nearly|almost|about|around|approx\.?|approximately|~)?\s*
+    \d+(?:\.\d+)?\s*\+?\s*
+    (?:years?|yrs?)
+    (?:\s*\+)?
+    \b""",
+    re.IGNORECASE | re.VERBOSE,
+)
+# A duration can BE the achievement -- "cut onboarding to 2 years" is a
+# result, not a tenure claim. Matched against the text immediately preceding
+# the duration so a real outcome is never stripped.
+_ACHIEVED_DURATION_RE = re.compile(
+    r"\b(?:by|from|to|within|under|below|saving|saved|cut|cutting|reduced"
+    r"|reducing|ahead\s+of|every)\s*$",
+    re.IGNORECASE,
+)
+# The marker can also TRAIL the duration: "delivered 2 years ahead of
+# schedule" puts the achievement word after the number, so one-sided context
+# is not enough.
+_ACHIEVED_DURATION_AFTER_RE = re.compile(
+    r"^\s*(?:ahead\s+of\s+schedule|early|earlier|sooner|faster|late"
+    r"|of\s+(?:manual\s+)?(?:effort|work|time|toil)\s+saved|under\s+budget)",
+    re.IGNORECASE,
+)
+
+
+def _strip_tenure(text: str) -> str:
+    """`text` with tenure claims removed, leaving achievement metrics intact."""
+    out: list[str] = []
+    last = 0
+    for m in _TENURE_RE.finditer(text):
+        before = text[max(0, m.start() - 24):m.start()].rstrip()
+        after = text[m.end():m.end() + 28]
+        if _ACHIEVED_DURATION_RE.search(before) or _ACHIEVED_DURATION_AFTER_RE.search(after):
+            continue
+        out.append(text[last:m.start()])
+        last = m.end()
+    out.append(text[last:])
+    return "".join(out)
+
+
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -209,26 +340,44 @@ def _score_summary(data: dict) -> tuple[int, list[Finding]]:
             action="rewrite",
         )]
 
+    budget = SUB_BUDGETS["summary"]
     words = len(text.split())
-    length_points = 8 if words >= 25 else (5 if words >= 12 else 2)
+    length_max = budget["length"]
+    length_points = length_max if words >= 25 else (4 if words >= 12 else 1)
     points = length_points
-    if length_points < 8:
+    if length_points < length_max:
         findings.append(Finding(
             id="summary.too_short", category="summary", target_ref="summary.text",
-            severity=_sev(8 - length_points), points=8 - length_points,
+            severity=_sev(length_max - length_points),
+            points=length_max - length_points,
             message=f"Summary is short ({words} words) — aim for 30–60",
             fix_hint="Name the role you want and quantify one achievement.",
             action="rewrite", meta={"words": words},
         ))
 
-    if _METRIC_RE.search(text):
-        points += 6
+    # Judged on the summary with tenure removed: see _TENURE_RE above.
+    if _METRIC_RE.search(_strip_tenure(text)):
+        points += budget["metric"]
     else:
+        # Distinguish "no numbers at all" from "a duration and nothing else".
+        # The advice differs, and telling someone who wrote "5+ years of
+        # experience" that their summary "has no quantified achievement"
+        # reads as though the system cannot see the number they typed.
+        tenure_only = bool(_METRIC_RE.search(text))
         findings.append(Finding(
             id="summary.no_metric", category="summary", target_ref="summary.text",
-            severity=_sev(6), points=6,
-            message="Summary has no quantified achievement",
-            fix_hint="Add a real number — team size, users served, latency cut.",
+            severity=_sev(budget["metric"]), points=budget["metric"],
+            message=(
+                "Summary states years of experience but no quantified achievement"
+                if tenure_only else
+                "Summary has no quantified achievement"
+            ),
+            fix_hint=(
+                "Keep the years — an ATS screens on them. Add one outcome "
+                "next to it: % improved, time saved, money, or scale."
+                if tenure_only else
+                "Add a real number — team size, users served, latency cut."
+            ),
             # `quantify`, NOT `rewrite`. The number still has to come from the
             # user -- inventing a metric is the one thing this system must
             # never do, and the writer corpus marks this finding must-decline.
@@ -239,19 +388,36 @@ def _score_summary(data: dict) -> tuple[int, list[Finding]]:
             # nothing. A plain `rewrite` here would still promise a fix the
             # system is built never to give.
             action="quantify",
+            meta={"tenure_only": tenure_only},
         ))
 
     # Whole-word, not substring: "Fulfilled orders" used to earn action-verb
     # credit because "fulfilled" contains "led", and "Downed" contains "owned".
     if any(contains(text, v) for v in ACTION_VERBS):
-        points += 6
+        points += budget["action_verb"]
     else:
         findings.append(Finding(
             id="summary.no_action_verb", category="summary",
-            target_ref="summary.text", severity=_sev(6), points=6,
+            target_ref="summary.text",
+            severity=_sev(budget["action_verb"]), points=budget["action_verb"],
             message="Summary lacks a strong action verb",
             fix_hint="Open with a verb like 'Led', 'Built' or 'Scaled'.",
             action="rewrite",
+        ))
+
+    # --- filler language (Part 3, Tier 1) ---
+    filler = quality_rules.find_filler(text)
+    if not filler:
+        points += budget["filler"]
+    else:
+        findings.append(Finding(
+            id="summary.filler_language", category="summary",
+            target_ref="summary.text",
+            severity=_sev(budget["filler"]), points=budget["filler"],
+            message=f"Filler phrase: \u201c{filler[0]}\u201d",
+            fix_hint="Every candidate claims this and none of them prove it. "
+                     "Replace it with the thing you actually did.",
+            action="rewrite", meta={"phrases": filler},
         ))
 
     return min(points, WEIGHTS["summary"]), findings
@@ -270,12 +436,13 @@ def _score_experience(data: dict) -> tuple[int, list[Finding]]:
             fix_hint="Add your roles, most recent first.",
         )]
 
+    base = SUB_BUDGETS["experience"]["base"]
     bullets = [b for e in entries for b in e.get("bullets", [])]
     if not bullets:
-        return 6, [Finding(
+        return base, [Finding(
             id="experience.no_bullets", category="experience",
             target_ref="experience", severity="high",
-            points=WEIGHTS["experience"] - 6,
+            points=WEIGHTS["experience"] - base,
             message="Experience entries have no bullet points",
             fix_hint="Describe what you did and what changed because of it.",
             # NOT "rewrite". target_ref="experience" is a container, not text:
@@ -286,13 +453,21 @@ def _score_experience(data: dict) -> tuple[int, list[Finding]]:
             action="",
         )]
 
-    points = 10
+    budget = SUB_BUDGETS["experience"]
+    points = base
 
-    # --- quantification (worth up to 18) ---
+    # --- quantification ---
+    metric_max = budget["metric"]
     with_metrics = sum(1 for b in bullets if _METRIC_RE.search(b))
-    metric_award = int(round((with_metrics / len(bullets)) * 18))
+    # FLOOR, not round. With round() the award depended on the size of the
+    # budget: at 12 points one weak bullet in 19 lost a point, but when Part
+    # 3 re-sliced the budget to 9, round(18/19 * 9) == 9 handed out FULL
+    # marks and the finding vanished -- a detection threshold created by
+    # accident. Flooring means the full budget is earned only when nothing
+    # is wrong, whatever the budget happens to be.
+    metric_award = int((with_metrics / len(bullets)) * metric_max)
     points += metric_award
-    if metric_award < 18:
+    if metric_award < metric_max:
         # Point at the FIRST unquantified bullet so "Fix" has somewhere to go.
         ref = next(
             (r for r, _p, t in _iter_experience_bullets(data)
@@ -301,8 +476,8 @@ def _score_experience(data: dict) -> tuple[int, list[Finding]]:
         )
         findings.append(Finding(
             id="experience.unquantified_bullets", category="experience",
-            target_ref=ref, severity=_sev(18 - metric_award),
-            points=18 - metric_award,
+            target_ref=ref, severity=_sev(metric_max - metric_award),
+            points=metric_max - metric_award,
             message=f"Only {with_metrics} of {len(bullets)} bullets are quantified",
             fix_hint="Add the number you moved: %, time saved, revenue, scale.",
             # Same mechanism as summary.no_metric above: restructure for a
@@ -311,23 +486,24 @@ def _score_experience(data: dict) -> tuple[int, list[Finding]]:
             meta={"quantified": with_metrics, "total": len(bullets)},
         ))
 
-    # --- action verbs (worth up to 12) ---
+    # --- action verbs ---
+    verb_max = budget["action_verb"]
     strong = sum(
         1 for b in bullets
-        if b.strip().split()[:1] and b.strip().split()[0].lower() in ACTION_VERBS
+        if b.strip().split()[:1] and b.strip().split()[0].lower() in BULLET_OPENER_VERBS
     )
-    verb_award = int(round((strong / len(bullets)) * 12))
+    verb_award = int((strong / len(bullets)) * verb_max)  # floor: see above
     points += verb_award
-    if verb_award < 12:
+    if verb_award < verb_max:
         ref = next(
             (r for r, _p, t in _iter_experience_bullets(data)
              if not (t.strip().split()[:1]
-                     and t.strip().split()[0].lower() in ACTION_VERBS)),
+                     and t.strip().split()[0].lower() in BULLET_OPENER_VERBS)),
             "experience",
         )
         findings.append(Finding(
             id="experience.weak_verbs", category="experience", target_ref=ref,
-            severity=_sev(12 - verb_award), points=12 - verb_award,
+            severity=_sev(verb_max - verb_award), points=verb_max - verb_award,
             message=f"{len(bullets) - strong} of {len(bullets)} bullets "
                     f"do not start with an action verb",
             fix_hint="Start with what you DID: Led, Built, Reduced, Migrated.",
@@ -341,17 +517,154 @@ def _score_experience(data: dict) -> tuple[int, list[Finding]]:
     # resume merely for not having been migrated yet.
     missing_dates = [i for i, e in enumerate(entries) if not date_label(e)]
     if not missing_dates:
-        points += 5
+        points += budget["dates"]
     else:
         findings.append(Finding(
             id="experience.missing_dates", category="experience",
-            target_ref=f"exp_{missing_dates[0]}", severity=_sev(5), points=5,
+            target_ref=f"exp_{missing_dates[0]}",
+            severity=_sev(budget["dates"]), points=budget["dates"],
             message=f"{len(missing_dates)} role(s) missing dates",
             fix_hint="Employment gaps are judged less harshly than missing dates.",
             meta={"entries": missing_dates},
         ))
 
+    points += _score_bullet_quality(data, budget, findings)
+
     return min(points, WEIGHTS["experience"]), findings
+
+
+def _score_bullet_quality(
+    data: dict, budget: dict[str, int], findings: list[Finding]
+) -> int:
+    """Part 3 Tier 1: five deterministic writing-quality checks over bullets.
+
+    Each is all-or-nothing rather than proportional. A proportional award
+    would make the card read "worth 2 points" while fixing one of three
+    offending bullets moved the score by less than that, breaking the
+    `Δscore == points` invariant the whole scorer is built around.
+
+    Every check points `target_ref` at the FIRST offending bullet so the
+    card's action has somewhere to go, and lists the rest in `meta` so the
+    UI can say how many remain.
+    """
+    points = 0
+    refs = list(_iter_experience_bullets(data))
+
+    # --- filler language ---
+    filler_hits = [
+        (ref, quality_rules.find_filler(text)) for ref, _p, text in refs
+    ]
+    filler_hits = [(ref, hits) for ref, hits in filler_hits if hits]
+    if not filler_hits:
+        points += budget["filler"]
+    else:
+        phrases = sorted({p for _r, hits in filler_hits for p in hits})
+        findings.append(Finding(
+            id="experience.filler_language", category="experience",
+            target_ref=filler_hits[0][0],
+            severity=_sev(budget["filler"]), points=budget["filler"],
+            message=f"{len(filler_hits)} bullet(s) use filler: "
+                    f"\u201c{phrases[0]}\u201d",
+            fix_hint="A recruiter has read this phrase a thousand times. "
+                     "State the work instead.",
+            action="rewrite",
+            meta={"refs": [r for r, _h in filler_hits], "phrases": phrases},
+        ))
+
+    # --- impossible metrics ---
+    impossible = [
+        (ref, quality_rules.find_impossible_metrics(text))
+        for ref, _p, text in refs
+    ]
+    impossible = [(ref, hits) for ref, hits in impossible if hits]
+    if not impossible:
+        points += budget["impossible_metric"]
+    else:
+        findings.append(Finding(
+            id="experience.impossible_metric", category="experience",
+            target_ref=impossible[0][0],
+            severity=_sev(budget["impossible_metric"]),
+            points=budget["impossible_metric"],
+            message=f"Figure that cannot be right: {impossible[0][1][0]}",
+            fix_hint="A 100% reduction means the number reached zero. If you "
+                     "meant a large improvement, give the before and after.",
+            # `quantify`, not `rewrite`: the correct number is a fact only
+            # the candidate has, so this routes into the existing [__]
+            # placeholder path rather than letting the writer invent one.
+            action="quantify",
+            meta={"refs": [r for r, _h in impossible],
+                  "values": [h for _r, hits in impossible for h in hits]},
+        ))
+
+    # --- first person ---
+    first_person = [
+        ref for ref, _p, text in refs if quality_rules.find_first_person(text)
+    ]
+    if not first_person:
+        points += budget["first_person"]
+    else:
+        findings.append(Finding(
+            id="experience.first_person", category="experience",
+            target_ref=first_person[0],
+            severity=_sev(budget["first_person"]),
+            points=budget["first_person"],
+            message=f"{len(first_person)} bullet(s) use \u201cI\u201d, "
+                    f"\u201cwe\u201d or \u201cmy\u201d",
+            fix_hint="Resume bullets are already written as you. Drop the "
+                     "pronoun and open with the verb.",
+            action="rewrite", meta={"refs": first_person},
+        ))
+
+    # --- repeated opener, scoped to ONE role ---
+    repeated: list[tuple[str, str, int]] = []
+    for i, entry in enumerate(data.get("experience", []) or []):
+        entry_bullets = entry.get("bullets", []) or []
+        for word, idxs in quality_rules.find_repeated_openers(entry_bullets).items():
+            repeated.append((f"exp_{i}.bullet_{idxs[0]}", word, len(idxs)))
+    if not repeated:
+        points += budget["repeated_opener"]
+    else:
+        ref, word, count = repeated[0]
+        findings.append(Finding(
+            id="experience.repeated_opener", category="experience",
+            target_ref=ref,
+            severity=_sev(budget["repeated_opener"]),
+            points=budget["repeated_opener"],
+            message=f"{count} bullets in one role open with "
+                    f"\u201c{word.title()}\u201d",
+            fix_hint="Vary the opening verb — repetition reads as one job "
+                     "described three times.",
+            action="rewrite",
+            meta={"refs": [r for r, _w, _c in repeated],
+                  "openers": sorted({w for _r, w, _c in repeated})},
+        ))
+
+    # --- tense mismatch ---
+    mismatched: list[str] = []
+    for i, entry in enumerate(data.get("experience", []) or []):
+        if not quality_rules.role_has_ended(entry, date_label(entry)):
+            continue
+        entry_bullets = entry.get("bullets", []) or []
+        mismatched += [
+            f"exp_{i}.bullet_{j}"
+            for j in quality_rules.find_present_tense(entry_bullets)
+        ]
+    if not mismatched:
+        points += budget["tense_mismatch"]
+    else:
+        findings.append(Finding(
+            id="experience.tense_mismatch", category="experience",
+            target_ref=mismatched[0],
+            severity=_sev(budget["tense_mismatch"]),
+            points=budget["tense_mismatch"],
+            message=f"{len(mismatched)} bullet(s) in a finished role are "
+                    f"written in the present tense",
+            fix_hint="A role you have left should read in the past tense: "
+                     "\u201cManaged\u201d, not \u201cManage\u201d.",
+            action="rewrite", meta={"refs": mismatched},
+        ))
+
+    return points
 
 
 def _iter_experience_bullets(data: dict):

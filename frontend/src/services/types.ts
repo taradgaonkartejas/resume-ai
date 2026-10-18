@@ -367,12 +367,20 @@ export interface Commentary {
 export interface AnalysisOut {
   id: string;
   resume_id: string;
+  /**
+   * Recomputed from the CURRENT resume on every read, not replayed from the
+   * stored report — so this never disagrees with the guided editor's number.
+   * `created_at` dates the prose below it, not these two fields.
+   */
   overall_score: number;
   category_scores: Record<CategoryKey, CategoryScore>;
   role_tags: string[];
   commentary: Commentary;
   ats_review: AtsReview;
   created_at: string;
+  /** The resume changed after the prose was written. Same flag the guided
+   *  editor stamps, so the two screens cannot disagree about its age. */
+  commentary_stale: boolean;
 }
 
 /* ---------- tailoring ---------- */

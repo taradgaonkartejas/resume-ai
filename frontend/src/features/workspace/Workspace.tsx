@@ -1,5 +1,17 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, FileUp, LayoutTemplate, Loader2, Minus, Plus } from "lucide-react";
+import {
+  ArrowLeft,
+  Check,
+  Eye,
+  FileUp,
+  LayoutTemplate,
+  Loader2,
+  Minus,
+  Plus,
+  Redo2,
+  Undo2,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { UserSwitcher } from "@/app/UserSwitcher";
 import { ThemeToggle } from "@/app/ThemeToggle";
@@ -13,11 +25,14 @@ import { useSearchParams } from "react-router-dom";
 import { useAppDispatch, useAppState, type LeftTab } from "@/lib/AppState";
 import { useNav, useResumeIdParam } from "@/app/nav";
 import {
+  useAcceptAll,
   useParseStatus,
+  useRedo,
   useResume,
   useResumes,
   useRestoreVersion,
   useTemplates,
+  useUndo,
 } from "@/api/queries";
 import { emptyResume } from "@/services";
 import { cn } from "cn";
@@ -56,6 +71,12 @@ export function Workspace() {
   // back on the empty state.
   const resumeId = routeResumeId ?? resumes?.[0]?.id ?? null;
   const restore = useRestoreVersion(resumeId);
+  const undo = useUndo(resumeId);
+  const redo = useRedo(resumeId);
+  // `null` session = every pending suggestion on the document, which is what
+  // a toolbar sitting above the whole preview should mean. The per-session
+  // Accept all in TailorPane stays scoped to its own session.
+  const acceptAll = useAcceptAll(resumeId, null);
   // Only polls while a parse is in flight; once ready it is a single read.
   const { data: parse } = useParseStatus(resumeId, Boolean(resumeId));
   const advisories = parse?.parse_advisories ?? [];
@@ -160,10 +181,14 @@ export function Workspace() {
           chat lines past ~70 characters are hard to scan, and the resume is
           the thing that benefits from extra width.
 
-          The left column is ~460px rather than 340px because it now hosts the
+          The left column is ~560px rather than 340px because it hosts the
           revision card — original text, the revised text, a REASONING block
-          and three buttons. That does not fit in 340px without wrapping the
-          buttons onto their own line.
+          and three buttons — and, on the experience step, the achievement
+          textareas. Long bullets are the unit of work here: at 460px a
+          six-line achievement wrapped into a scroll box barely taller than
+          the buttons beside it, which is the wrong thing to make small.
+          It also takes a larger share of the free space (1.2fr), so the
+          extra room on a wide screen goes to the pane being worked in.
 
           Consequence, accepted deliberately: the three-column layout starts at
           2xl (1536px) instead of xl (1280px). Between those widths you get a
@@ -171,8 +196,8 @@ export function Workspace() {
           already hidden below 1280px, so this moves an existing boundary
           rather than introducing one. */}
       <main
-        className="grid min-h-0 flex-1 grid-cols-[minmax(440px,1fr)_1fr]
-                   2xl:grid-cols-[minmax(460px,0.95fr)_minmax(380px,0.85fr)_minmax(0,1.2fr)]"
+        className="grid min-h-0 flex-1 grid-cols-[minmax(560px,1.2fr)_minmax(0,1fr)]
+                   2xl:grid-cols-[minmax(560px,1.15fr)_minmax(340px,0.7fr)_minmax(0,1.1fr)]"
       >
         {/* left: the two working modes */}
         <aside className="flex min-h-0 flex-col border-r border-line-soft bg-surface-1">
@@ -226,55 +251,7 @@ export function Workspace() {
             >
               {activeTemplateName}
             </button>
-            {/* Only once there is something to show. A toggle that is always
-                visible but usually inert invites the click that does
-                nothing. */}
-            {changedRefs.length > 0 && (
-              <button
-                onClick={() => dispatch({ type: "setShowChanges", on: !showChanges })}
-                aria-pressed={showChanges}
-                title="Highlight text changed by accepted suggestions in this session"
-                className={cn(
-                  "rounded-full border px-2 py-0.5 text-[11px] transition-colors",
-                  showChanges
-                    ? "border-transparent bg-mark text-on-mark"
-                    : "border-line-soft text-content-muted hover:border-brand-text hover:text-content",
-                )}
-              >
-                {showChanges ? "Hide changes" : "Show changes"}
-                <span className="ml-1 tabular-nums opacity-70">
-                  {changedRefs.length}
-                </span>
-              </button>
-            )}
-            {/* Decline = revert, and revert is undo. This restores the
-                cursor to where it stood before the first of the changes
-                currently highlighted, so the button undoes exactly what
-                "Show changes" is pointing at. Hidden unless we actually
-                captured a baseline, because reverting to a guess is worse
-                than offering nothing. */}
-            {changedRefs.length > 0 && baselineVersion !== null && (
-              <button
-                onClick={() => {
-                  if (
-                    window.confirm(
-                      `Undo ${changedRefs.length} accepted change` +
-                        `${changedRefs.length === 1 ? "" : "s"} and restore the ` +
-                        "resume to how it was before? You can redo this.",
-                    )
-                  ) {
-                    restore.mutate(baselineVersion);
-                  }
-                }}
-                disabled={restore.isPending}
-                title="Revert every change accepted in this session"
-                className="rounded-full border border-line-soft px-2 py-0.5 text-[11px]
-                           text-content-muted transition-colors hover:border-reject-text
-                           hover:text-reject-text disabled:opacity-60"
-              >
-                {restore.isPending ? "Reverting…" : "Decline all"}
-              </button>
-            )}
+            {/* ---- zoom + history, right of the title ---- */}
             <div className="ml-auto flex items-center gap-1">
               <button
                 aria-label="Zoom out"
@@ -293,7 +270,107 @@ export function Workspace() {
               >
                 <Plus className="size-3.5" />
               </button>
+
+              <span className="mx-1 h-4 w-px bg-line-soft" />
+
+              {/* Undo/redo move the SAME cursor Decline Changes moves. One
+                  history, three controls -- see useVersionStep. */}
+              <button
+                aria-label="Undo"
+                title="Undo the last change"
+                disabled={!hasResume || undo.isPending}
+                onClick={() => undo.mutate()}
+                className="grid size-7 place-items-center rounded-md border border-line-soft text-content-muted hover:text-content disabled:opacity-40"
+              >
+                <Undo2 className="size-3.5" />
+              </button>
+              <button
+                aria-label="Redo"
+                title="Redo the change you just undid"
+                disabled={!hasResume || redo.isPending}
+                onClick={() => redo.mutate()}
+                className="grid size-7 place-items-center rounded-md border border-line-soft text-content-muted hover:text-content disabled:opacity-40"
+              >
+                <Redo2 className="size-3.5" />
+              </button>
             </div>
+          </div>
+
+          {/* ---- Accept / Show / Decline ----
+
+              All three stay visible and go disabled rather than vanishing.
+              A control that disappears teaches nothing; a greyed one tells
+              you the action exists and why it is unavailable right now. */}
+          <div className="flex shrink-0 items-center justify-center gap-2 border-b border-line-soft bg-surface-1 px-4 pb-2">
+            <button
+              onClick={() => acceptAll.mutate()}
+              disabled={!hasResume || acceptAll.isPending}
+              title="Apply every pending suggestion on this resume"
+              className="flex items-center gap-1.5 rounded-full bg-accept px-4 py-1.5
+                         text-xs font-medium text-on-accept transition-opacity
+                         hover:opacity-90 disabled:opacity-40"
+            >
+              {acceptAll.isPending ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Check className="size-3.5" />
+              )}
+              Accept Changes
+            </button>
+
+            <button
+              onClick={() => dispatch({ type: "setShowChanges", on: !showChanges })}
+              aria-pressed={showChanges}
+              disabled={changedRefs.length === 0}
+              title="Highlight text changed by accepted suggestions in this session"
+              className={cn(
+                "flex items-center gap-1.5 rounded-full px-4 py-1.5 text-xs",
+                "font-medium transition-colors disabled:opacity-40",
+                showChanges
+                  ? "bg-brand text-on-brand hover:bg-brand-hover"
+                  : "border border-line-soft text-content-muted hover:border-brand-text hover:text-content",
+              )}
+            >
+              <Eye className="size-3.5" />
+              {showChanges ? "Hide Changes" : "Show Changes"}
+              {changedRefs.length > 0 && (
+                <span className="tabular-nums opacity-70">{changedRefs.length}</span>
+              )}
+            </button>
+
+            {/* Decline = revert, and revert is undo. This restores the cursor
+                to where it stood before the first of the changes currently
+                highlighted, so it undoes exactly what Show Changes points
+                at. Disabled without a baseline: reverting to a guess is
+                worse than offering nothing. */}
+            <button
+              onClick={() => {
+                if (
+                  baselineVersion !== null &&
+                  window.confirm(
+                    `Undo ${changedRefs.length} accepted change` +
+                      `${changedRefs.length === 1 ? "" : "s"} and restore the ` +
+                      "resume to how it was before? You can redo this.",
+                  )
+                ) {
+                  restore.mutate(baselineVersion);
+                }
+              }}
+              disabled={
+                changedRefs.length === 0 || baselineVersion === null || restore.isPending
+              }
+              title="Revert every change accepted in this session"
+              className="flex items-center gap-1.5 rounded-full bg-reject px-4 py-1.5
+                         text-xs font-medium text-on-reject transition-opacity
+                         hover:opacity-90 disabled:opacity-40"
+            >
+              {restore.isPending ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <X className="size-3.5" />
+              )}
+              Decline Changes
+            </button>
           </div>
 
           <div className="min-h-0 flex-1 overflow-auto bg-canvas p-6">

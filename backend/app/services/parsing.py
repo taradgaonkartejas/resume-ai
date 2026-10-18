@@ -28,7 +28,10 @@ _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
 _PHONE_RE = re.compile(r"(\+?\d[\d\s().-]{7,}\d)")
 _LINK_RE = re.compile(r"(https?://\S+|linkedin\.com/\S+|github\.com/\S+)", re.I)
 #: Separators used between fields on a contact line.
-_CONTACT_SEP_RE = re.compile(r"\s*[•·|]\s*|\s{2,}|\s+[-–—]\s+")
+#: `;` and a SPACED `/` are separators too. A bare `/` is not: it would
+#: split "github.com/taradgaonkartejas" into a host and a username, and the
+#: username would then look exactly like an unclaimed name field.
+_CONTACT_SEP_RE = re.compile(r"\s*[•·|;]\s*|\s{2,}|\s+[-–—/]\s+")
 #: Bare anchor words that stand in for a link, so they are not a location.
 _LINK_WORDS = {
     "linkedin", "github", "gitlab", "portfolio", "website", "resume", "cv",
@@ -36,9 +39,108 @@ _LINK_WORDS = {
     "leetcode", "kaggle", "behance", "dribbble", "youtube", "email", "phone",
 }
 
+
+def _looks_like_person_name(field: str) -> bool:
+    """True when a contact-line field could be the person's name.
+
+    Used only to rescue the name from a header that puts it on the SAME line
+    as the email and phone. It is deliberately a negative test -- it rejects
+    the things we can positively identify as something else -- because there
+    is no reliable positive test for "is a human name" that survives contact
+    with real resumes (initials, one-word names, non-Latin scripts).
+    """
+    if not (2 < len(field) <= 60) or len(field.split()) > 5:
+        return False
+    if _EMAIL_RE.search(field) or _PHONE_RE.search(field) or _LINK_RE.search(field):
+        return False
+    if field.lower() in _LINK_WORDS:
+        return False
+    # A digit anywhere means a phone fragment, a street address or a date --
+    # never a name.
+    if any(c.isdigit() for c in field):
+        return False
+    if not any(c.isalpha() for c in field):
+        return False
+    return _classify(field) is None
+
+
+#: Punctuation left clinging to a field after the line is split.
+_FIELD_TRIM = " \t•·|,;/-–—"
+
+
+def _is_contact_field(field: str) -> bool:
+    """True when the field is positively identifiable as contact data."""
+    return bool(
+        _EMAIL_RE.search(field)
+        or _PHONE_RE.search(field)
+        or _LINK_RE.search(field)
+        or field.lower() in _LINK_WORDS
+    )
+
+
+def _name_from_contact_line(line: str) -> str:
+    """Pull the person's name out of a line that also carries contact data.
+
+    Reads the FIRST separator-delimited field only. In every layout that
+    combines these, the name leads; scanning the whole line instead would
+    promote a real city ("email | phone | Pune, India") to the name on
+    headers that genuinely have no name -- a worse failure than a blank
+    name, which the contact finding already prompts the user to fill.
+
+    When the line has no separators at all ("John Smith github.com/js") the
+    identifiable contact tokens are cut out and whatever is left is tried,
+    so the name is not simply lost to a trailing URL.
+    """
+    fields = [f.strip(_FIELD_TRIM) for f in _CONTACT_SEP_RE.split(line)]
+    fields = [f for f in fields if f]
+    if not fields:
+        return ""
+
+    # Index of the last field we can positively identify as contact data.
+    last_contact = max(
+        (i for i, f in enumerate(fields) if _is_contact_field(f)), default=-1
+    )
+
+    for i, field in enumerate(fields):
+        if _is_contact_field(field):
+            continue
+        # THE POSITIONAL RULE. A header lists identity first, then ways to
+        # reach you, and the city last. So an unidentified field with more
+        # contact data AFTER it is the name, and one that trails all of the
+        # contact data is the location.
+        #
+        #   Tejas T | email | phone      -> field 0, phone after  -> name
+        #   email | Tejas T | phone      -> field 1, phone after  -> name
+        #   email | phone | Pune, India  -> field 2, nothing after -> location
+        #
+        # Reading the first unidentified field as the name regardless would
+        # put "Pune, India" in the name box and lose the location; refusing
+        # to look past field 0 loses the name entirely whenever the email
+        # leads, which is the bug this function exists to fix.
+        if i > last_contact:
+            break
+        return field if _looks_like_person_name(field) else ""
+
+    # No separators at all ("John Smith github.com/js"): cut the contact
+    # tokens out and try what is left, so the name is not lost to a URL.
+    if len(fields) == 1:
+        lead = fields[0]
+        for pattern in (_EMAIL_RE, _LINK_RE, _PHONE_RE):
+            lead = pattern.sub(" ", lead)
+        lead = " ".join(lead.split()).strip(_FIELD_TRIM)
+        if _looks_like_person_name(lead):
+            return lead
+    return ""
+
 _SECTION_HEADS = {
     "summary": {"summary", "profile", "objective", "about"},
-    "experience": {"experience", "employment", "work history", "professional experience"},
+    # "work experience" was missing while "work history" was present, so a
+    # resume using the single most common spelling of this heading had its
+    # entire employment section dropped. Found by a DOCX fixture that used
+    # it by accident -- the three real PDFs all say "EXPERIENCE".
+    "experience": {"experience", "employment", "work history",
+                   "work experience", "employment history",
+                   "professional experience"},
     "projects": {"projects", "personal projects", "selected projects"},
     "education": {"education", "academics"},
     "skills": {"skills", "technical skills", "technologies"},
@@ -159,6 +261,20 @@ def _normalise_link(url: str) -> str:
     return url.strip().rstrip("/")
 
 
+def _link_identity(url: str) -> str:
+    """Scheme- and `www.`-insensitive key, used for deduplication ONLY.
+
+    The displayed string and the href keep whatever the document said. This
+    exists because the same profile reaches us by two routes that spell it
+    differently: the text layer prints it bare ("github.com/taradgaonkartejas")
+    while the DOCX relationship part carries the real target
+    ("https://github.com/taradgaonkartejas"). Comparing raw strings treats
+    those as two profiles and renders GitHub twice.
+    """
+    bare = _normalise_link(url).lower().split("://", 1)[-1]
+    return bare[4:] if bare.startswith("www.") else bare
+
+
 def extract_links(filename: str, content: bytes) -> dict[str, object]:
     """Profile URLs from a PDF's annotation layer.
 
@@ -177,7 +293,44 @@ def extract_links(filename: str, content: bytes) -> dict[str, object]:
     found: list[str] = []
     email = ""
     phone = ""
-    if not filename.lower().endswith(".pdf"):
+    low_name = filename.lower()
+
+    # DOCX stores a hyperlink's target in the relationship part, never in the
+    # visible run -- so a resume that hyperlinks the word "LinkedIn" showed
+    # the parser no URL at all and then lost two points to
+    # `contact.links.missing`, for a link sitting in the file it uploaded.
+    # Exactly the bug the PDF annotation branch below was written to fix,
+    # never applied to the other format we accept.
+    if low_name.endswith(".docx"):
+        try:
+            import docx
+
+            document = docx.Document(io.BytesIO(content))
+            rels = list(document.part.rels.values())
+            for section in document.sections:
+                rels.extend(section.header.part.rels.values())
+                rels.extend(section.footer.part.rels.values())
+            for rel in rels:
+                if not getattr(rel, "is_external", False):
+                    continue
+                uri = (rel.target_ref or "").strip()
+                if not uri:
+                    continue
+                lowered = uri.lower()
+                if lowered.startswith("mailto:"):
+                    email = email or uri[7:].split("?", 1)[0]
+                elif lowered.startswith("tel:"):
+                    phone = phone or uri[4:]
+                elif lowered.startswith(("http://", "https://")) and _known_host(uri):
+                    found.append(_normalise_link(uri))
+        except Exception:  # noqa: BLE001 — links are a bonus, never a failure
+            return {"links": [], "email": "", "phone": ""}
+        seen_docx: dict[str, str] = {}
+        for url in found:
+            seen_docx.setdefault(url.lower(), url)
+        return {"links": list(seen_docx.values())[:6], "email": email, "phone": phone}
+
+    if not low_name.endswith(".pdf"):
         return {"links": [], "email": "", "phone": ""}
     try:
         import pdfplumber
@@ -213,11 +366,28 @@ def merge_extracted_links(data: dict, extracted: dict) -> dict:
     contact = data.setdefault("contact", {})
     existing = [x for x in contact.get("links", []) if x]
     merged = list(existing)
-    seen = {_normalise_link(x).lower() for x in existing}
+    # The set was built from NORMALISED values and probed with a RAW one, so
+    # it never matched anything the two routes spelled differently. PDFs hid
+    # it: their text layer shows anchor words ("LinkedIn"), not URLs, so
+    # `existing` was empty and nothing could collide. The DOCX relationship
+    # reader gave the text layer something to collide WITH.
+    index: dict[str, int] = {}
+    for position, link in enumerate(existing):
+        index.setdefault(_link_identity(link), position)
     for url in extracted.get("links", []):
-        if url.lower() not in seen:
-            seen.add(url.lower())
-            merged.append(url)
+        key = _link_identity(url)
+        if key in index:
+            # Same profile, two spellings. Keep the text layer's POSITION --
+            # twenty tests rely on it winning on order -- but take the
+            # qualified URL, because the PDF exporter hands this string
+            # straight to fpdf2 as a link target and a missing scheme is not
+            # a link at all.
+            position = index[key]
+            if "://" in url and "://" not in merged[position]:
+                merged[position] = url
+            continue
+        index[key] = len(merged)
+        merged.append(url)
     contact["links"] = merged[:6]
     if not contact.get("email") and extracted.get("email"):
         contact["email"] = extracted["email"]
@@ -313,9 +483,33 @@ def collect_parse_facts(filename: str, content: bytes, raw_text: str) -> dict:
     elif suffix == "docx":
         try:
             import docx
+            from docx.oxml.ns import qn
 
             document = docx.Document(io.BytesIO(content))
             facts["tables"] = len(document.tables)
+
+            # The header/footer band and text boxes are both layers that many
+            # ATS parsers skip. We now READ them (see _extract_docx), so the
+            # user loses nothing here -- but the recruiter's system may, and
+            # that is worth telling them before they send it.
+            facts["header_footer_text"] = any(
+                para.text.strip()
+                for section in document.sections
+                for band in (section.header, section.footer)
+                for para in band.paragraphs
+            )
+            facts["text_boxes"] = sum(
+                1 for _ in document.element.body.iter(qn("w:txbxContent"))
+            )
+            # `elem or {}` truth-tests an lxml element, which is deprecated
+            # and ambiguous -- an element with no children is falsey today
+            # and will be truthy in a future lxml. Test for None explicitly.
+            multi = 0
+            for section in document.sections:
+                cols = section._sectPr.find(qn("w:cols"))
+                if cols is not None and int(cols.get(qn("w:num"), "1") or 1) > 1:
+                    multi += 1
+            facts["multi_column_pages"] = multi
         except Exception as exc:  # noqa: BLE001
             logger.warning("parse facts: docx inspection failed: %s", exc)
 
@@ -379,6 +573,19 @@ def parse_advisories(facts: dict) -> list[str]:
             "the cells, but older parsers drop table content entirely — it is "
             "a common way for a whole skills section to vanish."
         )
+    if facts.get("header_footer_text"):
+        out.append(
+            "Some text sits in the Word header or footer band. We read it, "
+            "but a great many parsers skip that layer entirely — if your "
+            "phone or email is up there, it can reach a recruiter blank. "
+            "Move contact details into the body of the document."
+        )
+    if facts.get("text_boxes"):
+        out.append(
+            f"This DOCX uses {facts['text_boxes']} text box(es). We read "
+            "them, but they are invisible to most parsers, so anything in a "
+            "sidebar panel may never arrive. Plain paragraphs are safest."
+        )
     if facts.get("unknown_headings"):
         labels = ", ".join(f"\u201c{h}\u201d" for h in facts["unknown_headings"][:3])
         out.append(
@@ -390,27 +597,117 @@ def parse_advisories(facts: dict) -> list[str]:
     return out
 
 
+def _docx_table_text(table) -> list[str]:
+    """One line per row. Resumes routinely put the whole skills grid -- or a
+    two-column contact block -- in a table, and `document.paragraphs`
+    excludes table cells entirely."""
+    out: list[str] = []
+    for row in table.rows:
+        cells = [c.text.strip() for c in row.cells]
+        # A merged cell repeats its text across the row; de-duplicate
+        # consecutively so "Python, Go" does not appear three times.
+        deduped = [c for i, c in enumerate(cells) if c and (i == 0 or c != cells[i - 1])]
+        if deduped:
+            out.append(": ".join(deduped) if len(deduped) > 1 else deduped[0])
+    return out
+
+
+def _is_list_paragraph(para) -> bool:
+    """True for a Word list item.
+
+    python-docx returns `p.text` with the bullet glyph STRIPPED -- Word stores
+    the marker as numbering metadata, not as characters -- so a bulleted
+    achievement arrived at `structure_text` looking exactly like a heading or
+    a company line. On DOCX the whole experience section was being
+    reconstructed from guesswork.
+    """
+    pPr = para._p.pPr
+    if pPr is not None and pPr.numPr is not None:
+        return True
+    try:
+        return (para.style.name or "").lower().startswith("list")
+    except Exception:  # noqa: BLE001 -- a missing style must not kill the parse
+        return False
+
+
+def _textbox_lines(element) -> list[str]:
+    """Text inside a Word text box.
+
+    Templates put sidebars, contact blocks and skill panels in text boxes,
+    and python-docx's `paragraphs` does not see them: the content sits in
+    `w:txbxContent`, which is a descendant of a run rather than of the body.
+    It was present in document.xml and dropped on the floor.
+
+    Both the VML (`v:textbox`) and DrawingML (`wps:txbx`) wrappers contain a
+    `w:txbxContent`, so matching on that one tag covers both.
+    """
+    from docx.oxml.ns import qn
+
+    lines: list[str] = []
+    for box in element.iter(qn("w:txbxContent")):
+        for para in box.iter(qn("w:p")):
+            text = "".join(node.text or "" for node in para.iter(qn("w:t")))
+            if text.strip():
+                lines.append(text.strip())
+    return lines
+
+
+def _extract_docx(content: bytes) -> str:
+    """Everything a DOCX resume actually contains, in document order.
+
+    The previous implementation read `document.paragraphs` plus tables, which
+    silently discarded four kinds of content the candidate had supplied: the
+    header/footer band, list markers, text boxes, and hyperlink targets
+    (the last of those lives in `extract_links`).
+
+    Order matters -- `structure_text` finds sections by reading lines in
+    sequence -- so the body is walked as XML rather than through the two
+    flat collections, which do not interleave.
+    """
+    import docx
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    document = docx.Document(io.BytesIO(content))
+    parts: list[str] = []
+
+    # The header band comes first because that is where it is printed, and
+    # because the contact details it usually holds belong at the top for
+    # `structure_text`. Many ATS parsers skip this layer entirely, which is
+    # why `collect_parse_facts` also records that it was used.
+    for section in document.sections:
+        for para in section.header.paragraphs:
+            if para.text.strip():
+                parts.append(para.text.strip())
+
+    body = document.element.body
+    for child in body.iterchildren():
+        if child.tag == qn("w:p"):
+            para = Paragraph(child, document)
+            text = para.text.strip()
+            if text:
+                # Restore the marker Word kept as metadata, so a bullet is
+                # recognisable as a bullet downstream.
+                parts.append(f"- {text}" if _is_list_paragraph(para) else text)
+            parts.extend(_textbox_lines(child))
+        elif child.tag == qn("w:tbl"):
+            parts.extend(_docx_table_text(Table(child, document)))
+
+    for section in document.sections:
+        for para in section.footer.paragraphs:
+            if para.text.strip():
+                parts.append(para.text.strip())
+
+    return "\n".join(parts)
+
+
 def extract_text(filename: str, content: bytes) -> str:
     suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if suffix == "pdf":
         return _extract_pdf(content)
     if suffix == "docx":
-        import docx
-
-        document = docx.Document(io.BytesIO(content))
-        parts = [p.text for p in document.paragraphs]
-        # document.paragraphs EXCLUDES table cells. Resumes routinely put the
-        # whole skills grid (or a two-column contact block) in a table, and all
-        # of it was being dropped silently.
-        for table in document.tables:
-            for row in table.rows:
-                cells = [c.text.strip() for c in row.cells]
-                # A merged cell repeats its text across the row; de-duplicate
-                # consecutively so "Python, Go" does not appear three times.
-                deduped = [c for i, c in enumerate(cells) if c and (i == 0 or c != cells[i - 1])]
-                if deduped:
-                    parts.append(": ".join(deduped) if len(deduped) > 1 else deduped[0])
-        return "\n".join(parts)
+        return _extract_docx(content)
     return content.decode("utf-8", errors="replace")
 
 
@@ -567,6 +864,32 @@ _QUALIFICATION_RE = re.compile(
 )
 
 
+# A sub-brand glued to the employer by a dash. The real header reads
+#
+#     Software Engineer | Ceinsys Tech Ltd. — Scan to Model (S2M)  Apr 2024 – Present
+#
+# and "Scan to Model (S2M)" is the product, not part of the company name.
+# Left alone it produced the placement
+# "Ceinsys Tech Ltd. — Scan to Model (S2M) — Software Engineer", which
+# carries THREE " — " segments -- and since `placement_for` joins company and
+# role with that same separator, the label becomes impossible to read or to
+# split back apart.
+_SUBBRAND_SEP_RE = re.compile(r"\s+[\u2014\u2013]\s+")
+
+
+def _pair_lean(left: str, right: str, first_re: re.Pattern, second_re: re.Pattern) -> int:
+    """How strongly a two-sided header wants to be swapped.
+
+    Positive means the right side is the better FIRST field, negative means
+    the left side is, and zero means neither side carries any evidence --
+    which is the case `_order_pair` deliberately refuses to guess at.
+    """
+    def lean(text: str) -> int:
+        return len(first_re.findall(text)) - len(second_re.findall(text))
+
+    return lean(right) - lean(left)
+
+
 def _order_pair(
     left: str, right: str, first_re: re.Pattern, second_re: re.Pattern
 ) -> tuple[str, str]:
@@ -591,6 +914,72 @@ def _order_pair(
         return len(first_re.findall(text)) - len(second_re.findall(text))
 
     return (right, left) if lean(right) > lean(left) else (left, right)
+
+
+def _resolve_ambiguous_orientation(entries: list[dict]) -> None:
+    """Settle company/role ties using the rest of the same resume.
+
+    `_order_pair` scores each side of a header and keeps the given order on a
+    tie, which is the right default in isolation: guessing is how a correct
+    entry gets destroyed. But it left "Animator | Vedantu" as
+    company="Animator", role="Vedantu" -- backwards -- because neither word
+    appears in the job-title or company-suffix vocabulary, and no vocabulary
+    will ever cover every job.
+
+    The missing evidence is not in the line, it is in the document. A resume
+    writes its headers ONE way: the same file resolves
+    "Software Engineer | Ceinsys Tech Ltd. — ..." unambiguously as role-first,
+    so the ambiguous row is role-first too.
+
+    Only ties are touched, and only when the unambiguous rows agree. A
+    resume that mixes both orders, or that offers no evidence at all, is left
+    exactly as it parsed.
+    """
+    confident = [e for e in entries if not e.get("_tied")]
+    if not confident:
+        return
+    # True when the header was written "Role | Company".
+    votes = [e.get("_role_first", False) for e in confident]
+    if len(set(votes)) != 1:
+        return  # the document is inconsistent; do not impose an order
+    role_first = votes[0]
+    for entry in entries:
+        if entry.get("_tied") and entry.get("_role_first") != role_first:
+            entry["company"], entry["role"] = entry["role"], entry["company"]
+            entry["_role_first"] = role_first
+
+
+# A metadata label, not a heading. Real resumes write
+#
+#     Outreach AI (Auto-Pilot Sales Assistant)
+#     Tech Stack: Next.js, Node.js/Express.js, FastAPI, PostgreSQL, ...
+#     - Built a HubSpot-backed sequencing engine ...
+#
+# and the stack line was read as the start of a SECOND project, so the
+# tailor rendered a card whose placement was the entire technology list.
+# Two of the three real resumes hit this.
+_LABEL_LINE_RE = re.compile(
+    r"^\s*(tech\s*stack|stack|technologies|tech|tools?|built\s+with|"
+    r"skills\s+used|frameworks?)\s*[:\u2013\u2014-]",
+    re.IGNORECASE,
+)
+
+# A heading has to contain a word. "200%." does not.
+#
+# It is the tail of a sentence that wrapped ("...improving throughput by
+# 200%."), and because it starts with a digit rather than a lowercase letter
+# `_is_bullet_continuation` let it through, so it became a project named
+# "200%.". Requiring one alphabetic run of two or more characters is the
+# narrowest rule that rejects it, and it cannot misfire on a real heading --
+# "Ceinsys Tech Ltd." and "Bike Point" both pass trivially, including the
+# abbreviation-final-period case that a "no trailing full stop" rule would
+# have broken.
+_WORDY_RE = re.compile(r"[A-Za-z]{2,}")
+
+
+def _looks_like_entry_header(line: str) -> bool:
+    """False for a line that cannot be the title of a job or a project."""
+    return bool(_WORDY_RE.search(line))
 
 
 def _is_bullet_continuation(line: str, entry: dict | None) -> bool:
@@ -716,8 +1105,28 @@ def structure_text(raw: str) -> dict:
 
     if non_empty:
         first = non_empty[0].strip()
-        if len(first) < 60 and "@" not in first:
-            data["contact"]["name"] = first
+        name = ""
+        # A header that runs the name, email and phone together on ONE line
+        # ("Tejas T | tejas@example.com | +91 8208300420") lost the name
+        # completely AND filed it as the city. Two failures, one cause: the
+        # name test below rejected any line containing "@", so nothing
+        # claimed the name, and the location sweep further down -- which
+        # skips any field equal to the name -- then found the person's name
+        # as the first unclaimed field on the line. Both wrong values reach
+        # the DOCX and PDF exports.
+        #
+        # The same line WITHOUT an email ("Rohit Nair | +91 ... | Bengaluru")
+        # failed differently and worse: it passed the "@" test, so the whole
+        # line became the name, and the location still came out as "Rohit
+        # Nair". So the trigger is contact data of ANY kind on the line, not
+        # an "@".
+        if _EMAIL_RE.search(first) or _PHONE_RE.search(first) or _LINK_RE.search(first):
+            name = _name_from_contact_line(first)
+        elif len(first) < 60:
+            name = first
+
+        if name:
+            data["contact"]["name"] = name
 
             # The line straight after the name is the professional title on
             # essentially every resume layout ("Dental Office Manager").
@@ -769,6 +1178,13 @@ def structure_text(raw: str) -> dict:
             if _EMAIL_RE.search(field) or _PHONE_RE.search(field):
                 continue
             if _LINK_RE.search(field) or field.lower() in _LINK_WORDS:
+                continue
+            # A section heading sharing the contact line ("EXPERIENCE |
+            # a@b.com | ...") is rejected as a NAME by _looks_like_person_name
+            # but was then happily filed as the location. `_classify` runs on
+            # the whole LINE above, which does not catch a heading sitting in
+            # one field of it.
+            if _classify(field):
                 continue
             if field == data["contact"].get("name") or any(c.isdigit() for c in field):
                 continue
@@ -864,6 +1280,25 @@ def structure_text(raw: str) -> dict:
                 entry["bullets"][-1] = f"{entry['bullets'][-1]} {line.strip()}"
                 continue
 
+            stripped_now = line.strip()
+
+            # P1: a labelled metadata line never opens an entry. Keep the
+            # text -- it is real content the candidate wrote -- but file it
+            # under the entry it describes.
+            if _LABEL_LINE_RE.match(stripped_now):
+                if entry is not None:
+                    entry["bullets"].append(stripped_now)
+                # With no open entry there is nothing to attach it to, and
+                # opening one named "Tech Stack: ..." is the bug being fixed.
+                continue
+
+            # P2: a line with no word in it is not a heading. Rejoin it to
+            # the bullet it wrapped out of, which is where it came from.
+            if not _looks_like_entry_header(stripped_now):
+                if entry is not None and entry["bullets"]:
+                    entry["bullets"][-1] = f"{entry['bullets'][-1]} {stripped_now}"
+                continue
+
             # A PRODUCT / PROJECT SUBTITLE under the header is not a second
             # employer. Real resumes write
             #
@@ -888,7 +1323,16 @@ def structure_text(raw: str) -> dict:
                 # not as an employer. There is no description field on an
                 # entry, and discarding a line the candidate wrote is worse
                 # than filing it one level down.
-                entry["bullets"].append(stripped_line)
+                #
+                # A sub-brand split off the company header belongs in front
+                # of this line: "Scan to Model (S2M)" followed by "Point-cloud
+                # and geospatial platform for ..." is exactly how the resume
+                # reads, and rejoining them keeps the product name attached
+                # to its own description instead of to the employer.
+                sub_text = entry.pop("_sub", "")
+                entry["bullets"].append(
+                    f"{sub_text} \u2014 {stripped_line}" if sub_text else stripped_line
+                )
                 continue
 
             if entry is not None and entry["bullets"]:
@@ -899,20 +1343,46 @@ def structure_text(raw: str) -> dict:
                 continue
             header, dates = _split_date_tail(header)
             parts = _HEADER_SEP_RE.split(header, maxsplit=1)
-            company, role = _order_pair(
-                parts[0].strip(),
-                parts[1].strip() if len(parts) > 1 else "",
-                _COMPANY_RE,
-                _ROLE_RE,
-            )
+            left = parts[0].strip()
+            right = parts[1].strip() if len(parts) > 1 else ""
+            company, role = _order_pair(left, right, _COMPANY_RE, _ROLE_RE)
+
+            # P3: a dashed sub-brand is the product, not the employer.
+            sub = ""
+            if company:
+                sub_parts = _SUBBRAND_SEP_RE.split(company, maxsplit=1)
+                if len(sub_parts) == 2 and sub_parts[1].strip():
+                    company, sub = sub_parts[0].strip(), sub_parts[1].strip()
+
             entry = {
                 "company": company,
                 "role": role,
                 "dates": dates,
                 "bullets": [],
             }
+            # P4 bookkeeping: remember whether this header carried any
+            # evidence, and which way round it was written, so a tie can be
+            # settled later from the rest of the document.
+            entry["_tied"] = bool(right) and _pair_lean(
+                left, right, _COMPANY_RE, _ROLE_RE
+            ) == 0
+            entry["_role_first"] = bool(right) and role == left
+            if sub:
+                entry["_sub"] = sub
         if entry is not None and entry["bullets"]:
             entries.append(entry)
+
+        if key == "experience":
+            _resolve_ambiguous_orientation(entries)
+        for e in entries:
+            # A sub-brand with no description line after it is still the
+            # candidate's text, so it is kept rather than dropped.
+            leftover = e.pop("_sub", "")
+            if leftover:
+                e["bullets"].insert(0, leftover)
+            e.pop("_tied", None)
+            e.pop("_role_first", None)
+
         if key == "projects":
             for e in entries:
                 e["name"] = e.pop("company", "")

@@ -24,7 +24,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
-from app.ai import prose
+from app.ai import cache, prose
 from app.config import is_placeholder, settings
 
 logger = logging.getLogger(__name__)
@@ -411,6 +411,104 @@ def is_excluded(qualified: str) -> bool:
     return bool(EXCLUDED_MODEL_RE.search(name) or EXCLUDED_MODEL_RE.search(qualified))
 
 
+_RETIRED_LOGGED: set[str] = set()
+
+#: Models removed after being MEASURED, and why.
+#:
+#: Each of these already had its reasoning written down -- in a comment, in
+#: this file and in config.py. A comment is not a guard. The ids stay
+#: reachable through `backend/.env`, so `MODEL_JD_ANALYSIS=nvidia:z-ai/
+#: glm-5.3-flash` silently put a model back on the JD path that the chain had
+#: deliberately dropped for burning the full timeout -- and nothing said so.
+#:
+#: This is deliberately a DIFFERENT list from EXCLUDED_MODEL_RE. That one is
+#: about data protection and is absolute. This one is about measured
+#: behaviour on this account: an entry can legitimately be retired if the
+#: provider fixes it, so each carries the date and the observation rather
+#: than a bare ban.
+RETIRED_MODELS: dict[str, str] = {
+    "nvidia:z-ai/glm-5.3-flash":
+        "burns the full llm_timeout_seconds (45s) instead of answering; "
+        "removed from FALLBACK_CHAIN because every task that fell through "
+        "paid the timeout",
+    "nvidia:moonshotai/kimi-k2.6":
+        "listed in NVIDIA's catalogue but returns 404 'Function not found "
+        "for account' -- being catalogued is not being callable",
+    "nvidia:nvidia/nemotron-3-super-120b-a12b":
+        "retired by NVIDIA 2026-10-03 (HTTP 410), about nine hours after a "
+        "probe measured it at 0.45s",
+    "nvidia:nvidia/nemotron-3.5-lightning-30b-a3b":
+        "pings in 0.33s and then times out at 45s on a real generation -- "
+        "the reason ping latency is not a selection criterion",
+}
+
+
+#: Models kept in the chain for VENDOR DIVERSITY but measured too slow to be
+#: tried early. Distinct from RETIRED_MODELS on purpose.
+#:
+#: Retiring nemotron-3-ultra-550b-a55b outright is the obvious move -- it timed
+#: out at 45,187ms on a live scoring call and again on writing -- but it is the
+#: shared chain's ONLY non-Groq entry, so removing it makes
+#: `test_a_chain_spans_providers_so_a_429_has_somewhere_to_go` fail for a real
+#: reason: a Groq rate limit would then have nowhere to go. Both tests caught
+#: exactly that when it was tried.
+#:
+#: The honest reading is that the diversity assertion had ROTTED into a proxy:
+#: a dead NVIDIA id satisfies "spans providers" by name while providing no
+#: actual fallback. So the model stays reachable for the 429 case and is pushed
+#: to the BACK of every chain, where it is only ever tried after the working
+#: models have failed.
+#:
+#: This matters most for `writing`, where the critic demotion removes
+#: groq:openai/gpt-oss-120b from slot 2 and promoted this model into it -- so a
+#: codecraft timeout was followed by a second guaranteed timeout before
+#: anything that answers. That is the 90s the user's browser gave up on.
+SLOW_MODELS: dict[str, str] = {
+    "nvidia:nvidia/nemotron-3-ultra-550b-a55b":
+        "times out rather than answering: 45,187ms on a live scoring call "
+        "(2026-10-11) and again on writing (2026-10-18). Kept only because "
+        "it is the chain's sole non-Groq entry; tried last so a working "
+        "model is always reached first. Replace it with an NVIDIA model "
+        "that `make models-gen-all nvidia` OBSERVES to generate.",
+}
+
+
+def is_slow(qualified: str) -> bool:
+    """True for a model measured too slow to be worth an early attempt."""
+    return qualified in SLOW_MODELS
+
+
+def _deprioritise_slow(chain: list[str]) -> list[str]:
+    """Move measured-slow models to the back, preserving relative order.
+
+    Not a drop: these are still real fallbacks for the case the chain exists
+    to survive, a vendor-wide rate limit. They just must never sit in front of
+    a model that answers.
+    """
+    return [m for m in chain if not is_slow(m)] + [m for m in chain if is_slow(m)]
+
+
+def is_retired(qualified: str) -> bool:
+    """True for a model withdrawn after measurement on this account."""
+    return qualified in RETIRED_MODELS
+
+
+def _drop_retired(chain: list[str], task: str) -> list[str]:
+    """Remove measured-bad models from a chain, warning once per model."""
+    for model in [m for m in chain if is_retired(m)]:
+        if model not in _RETIRED_LOGGED:
+            _RETIRED_LOGGED.add(model)
+            logger.warning(
+                "%r is configured for the %s chain but was RETIRED after "
+                "measurement (%s). It will not be called; that task runs on "
+                "its next fallback. Remove it from backend/.env.",
+                model,
+                task,
+                RETIRED_MODELS[model],
+            )
+    return [m for m in chain if not is_retired(m)]
+
+
 def _drop_excluded(chain: list[str], task: str) -> list[str]:
     """Remove excluded models from a chain, warning once per model."""
     banned = [m for m in chain if is_excluded(m)]
@@ -444,6 +542,11 @@ def resolve_chain(task: str) -> list[str]:
     # "... -> groq:openai/gpt-oss-120b -> groq:openai/gpt-oss-120b -> ...".
     chain = list(dict.fromkeys([preferred, *FALLBACK_CHAIN]))
 
+    # Measured-slow models go to the back BEFORE the critic demotion below.
+    # Doing it after would push a dead model behind the critic and re-break
+    # writer independence, which a test pins.
+    chain = _deprioritise_slow(chain)
+
     # The writer must not be graded by its own model, and FALLBACK_CHAIN's
     # SECOND entry is exactly the critic's model -- so the first time the
     # preferred writer failed, the chain landed on the critic and the
@@ -463,6 +566,9 @@ def resolve_chain(task: str) -> list[str]:
     # even when the excluded model has no key -- otherwise the misconfiguration
     # stays invisible until the day someone pastes a key in.
     chain = _drop_excluded(chain, task)
+    # Same placement rationale as above: warn even with no key, so the
+    # misconfiguration is visible before someone pastes a key in.
+    chain = _drop_retired(chain, task)
 
     usable = [m for m in chain if provider_for(m).configured]
     skipped = [m for m in chain if not provider_for(m).configured]
@@ -699,6 +805,25 @@ def complete(
     chain = resolve_chain(task)
     trace: list[dict] = []
 
+    # Keyed on the model actually preferred for this task, so a cached answer
+    # is never served in place of a different model than the one that would run.
+    cache_key = ""
+    if cache.cacheable(task, temperature):
+        cache_key = cache.make_key(
+            task=task, model=chain[0], system=system, user=user,
+            temperature=temperature,
+        )
+        hit = cache.get(cache_key)
+        if hit is not None:
+            return CallResult(
+                content=hit["content"],
+                model=hit.get("model", chain[0]),
+                latency_ms=0,
+                status=hit.get("status", "ok"),
+                trace=[{"model": hit.get("model", chain[0]), "status": "cached",
+                        "latency_ms": 0, "cached": True}],
+            )
+
     for model in chain:
         started = time.perf_counter()
         try:
@@ -708,6 +833,12 @@ def complete(
             elapsed = int((time.perf_counter() - started) * 1000)
             tokens_in, tokens_out = _usage(response)
             trace.append({"model": model, "status": "ok", "latency_ms": elapsed})
+            if cache_key:
+                # Only a success reaches here -- a failure raises and is
+                # handled below -- so an outage can never be cached.
+                cache.put(cache_key, {
+                    "content": response.content, "model": model, "status": "ok",
+                })
             return CallResult(
                 content=response.content,
                 model=model,
@@ -762,6 +893,32 @@ def structured(
     trace: list[dict] = []
     wait_budget = RATE_LIMIT_WAIT_BUDGET_SECONDS
 
+    # The schema NAME and its FIELD SET are both in the key: adding a field
+    # changes what a complete answer looks like, and an entry written before
+    # the change would still validate while silently missing the new field.
+    cache_key = ""
+    if cache.cacheable(task, temperature):
+        cache_key = cache.make_key(
+            task=task, model=chain[0], system=system, user=user,
+            temperature=temperature,
+            schema=f"{schema.__name__}:{sorted(schema.model_fields)}",
+        )
+        hit = cache.get(cache_key)
+        if hit is not None:
+            try:
+                restored = schema.model_validate_json(hit["json"])
+            except Exception:  # noqa: BLE001 — a stale shape is just a miss
+                restored = None
+            if restored is not None:
+                return restored, CallResult(
+                    content=restored,
+                    model=hit.get("model", chain[0]),
+                    latency_ms=0,
+                    status=hit.get("status", "ok"),
+                    trace=[{"model": hit.get("model", chain[0]),
+                            "status": "cached", "latency_ms": 0, "cached": True}],
+                )
+
     for model in chain:
         attempts = 0
         while True:
@@ -795,6 +952,15 @@ def structured(
                         "LLM %s ignored json_schema for task %s; recovered via %s",
                         model, task, status,
                     )
+                if cache_key:
+                    try:
+                        cache.put(cache_key, {
+                            "json": parsed.model_dump_json(),
+                            "model": model,
+                            "status": status,
+                        })
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("cache serialise failed: %s", exc)
                 return parsed, CallResult(
                     content=parsed,
                     model=model,

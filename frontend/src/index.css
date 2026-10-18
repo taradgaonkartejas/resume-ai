@@ -36,9 +36,11 @@
 
   /* Accept / Reject. Shades differ per theme AND are chosen for protanopia
      separation — see the note above --accept-fill below. */
+  --green-100: #d1fae5;
   --green-300: #6ee7b7;
   --green-500: #10b981;
   --green-700: #047857;
+  --green-900: #064e3b;
   --red-400: #f87171;
   --red-600: #dc2626;
   --red-700: #b91c1c;
@@ -74,6 +76,16 @@
   --edit-on-fill: var(--ink);
   --mark-bg: var(--brand-200); /* dark text: 12.52 */
   --mark-text: var(--ink);
+
+  /* The "changed text" highlight in the resume preview. Deliberately NOT
+     --mark-bg: the mark is the keyword/placeholder highlight and stays
+     lavender, while a change is its own idea and the user asked for green.
+     These four are IDENTICAL in both themes on purpose -- they are only ever
+     painted on the resume paper, which is #ffffff in light AND dark. */
+  --change-bg: var(--green-100); /* --green-900 label: 12.31 */
+  --change-text: var(--green-900);
+  --change-border: var(--green-500);
+  --change-outline: var(--green-300);
 
   --warn-text: var(--orange-700); /* 4.98 — #F75C03 fails at 3.00 */
   --warn-fill: var(--orange-500);
@@ -131,6 +143,16 @@
   --edit-on-fill: var(--ink);
   --mark-bg: var(--brand-200); /* dark text: 12.52 */
   --mark-text: var(--ink);
+
+  /* The "changed text" highlight in the resume preview. Deliberately NOT
+     --mark-bg: the mark is the keyword/placeholder highlight and stays
+     lavender, while a change is its own idea and the user asked for green.
+     These four are IDENTICAL in both themes on purpose -- they are only ever
+     painted on the resume paper, which is #ffffff in light AND dark. */
+  --change-bg: var(--green-100); /* --green-900 label: 12.31 */
+  --change-text: var(--green-900);
+  --change-border: var(--green-500);
+  --change-outline: var(--green-300);
 
   --warn-text: var(--orange-500); /* 4.95 on surface-1 */
   --warn-fill: var(--orange-500);
@@ -216,6 +238,10 @@
   --color-on-edit: var(--edit-on-fill);
   --color-mark: var(--mark-bg);
   --color-on-mark: var(--mark-text);
+  --color-change: var(--change-bg);
+  --color-on-change: var(--change-text);
+  --color-change-border: var(--change-border);
+  --color-change-outline: var(--change-outline);
 
   --color-warning: var(--warn-text);
   --color-warning-fill: var(--warn-fill);

@@ -1,4 +1,5 @@
 import { http } from "@/api/client";
+import { LLM_REQUEST_TIMEOUT_MS } from "@/lib/env";
 import type { AcceptAllOut, SuggestionOut } from "./types";
 
 /**
@@ -66,6 +67,9 @@ export const suggestionService = {
     http.post<SuggestionOut>(
       `/resumes/${resumeId}/sections/${encodeURIComponent(targetRef)}/rewrite`,
       { finding_id: opts.findingId ?? "", regenerate: opts.regenerate ?? false },
+      // writer -> critic -> up to CRITIC_MAX_REVISIONS retries, each over the
+      // model chain. The longest LLM path in the app.
+      { timeoutMs: LLM_REQUEST_TIMEOUT_MS },
     ),
 
   /**

@@ -132,11 +132,17 @@ class AnalysisOut(BaseModel):
     model_config = ORM
     id: uuid.UUID
     resume_id: uuid.UUID
+    # Recomputed from the CURRENT structured_data on every read, not read
+    # back from the stored row -- see AnalysisService.latest(). `created_at`
+    # therefore dates the prose below, not these numbers.
     overall_score: int
     category_scores: dict = Field(default_factory=dict)
     role_tags: list = Field(default_factory=list)
     trace: dict = Field(default_factory=dict, exclude=True)
     created_at: datetime
+    # True when the resume changed after the prose was written. Mirrors
+    # AnalysisStepsOut.commentary_stale so both screens stamp it the same way.
+    commentary_stale: bool = False
 
     @computed_field  # type: ignore[prop-decorator]
     @property

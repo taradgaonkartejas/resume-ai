@@ -916,9 +916,33 @@ def rewrite_for_finding(
                     context=context,
                     length_rule=_length_rule(target_ref),
                 )
+            # `fix_hint` is CARD COPY, written for a human looking at a
+            # recommendation -- and for the quantify findings it is a menu of
+            # example dimensions:
+            #
+            #   summary.no_metric  "Add a real number -- team size, users
+            #                       served, latency cut."
+            #
+            # Handing that to the writer as "Guidance:" told the model to go
+            # and find users and team sizes. It did, and produced "serving
+            # [__] users" for a resume that says nothing about users, which
+            # the critic then rejected. The guidance and the card were one
+            # string serving two audiences, and the model's audience is the
+            # one where an example reads as an instruction.
+            #
+            # The human still sees the menu; the writer gets the rule.
+            if quantifying and not composing:
+                guidance = (
+                    "The figure must measure something the line ALREADY "
+                    "states. Do not introduce a new thing to count -- no "
+                    "users, countries, team sizes or customers unless the "
+                    "line itself names them."
+                )
+            else:
+                guidance = finding.get("fix_hint", "")
             payload = (
                 f"Problem to fix: {finding.get('message', '')}\n"
-                f"Guidance: {finding.get('fix_hint', '')}\n\n"
+                f"Guidance: {guidance}\n\n"
             )
             payload += (
                 "Write the missing section."

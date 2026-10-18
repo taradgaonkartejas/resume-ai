@@ -79,6 +79,36 @@ export class ApiError extends Error {
     );
   }
 
+  /** The fact-checker threw the draft away.
+   *
+   *  Deliberately NOT part of `isFinalRefusal`, though it was tempting. The
+   *  writer runs at temperature 0.4, so a retry genuinely can produce a draft
+   *  that passes -- unlike `needs_your_fact`, where the model has reasoned
+   *  that the number cannot be known and will reason that way again.
+   *
+   *  It is its own state because it is also not an *error*. Nothing is
+   *  broken and the user did nothing wrong: the safety net caught a rewrite
+   *  that would have put a fabricated claim on a resume. Showing it in the
+   *  same red as a failure teaches the user to distrust the tool at the
+   *  moment it is protecting them. The caller should say what was objected
+   *  to -- `message` already carries the reviewer's own words -- and cap the
+   *  retries, because a writer that invented a detail once tends to reach
+   *  for it again. */
+  get isReviewerObjection(): boolean {
+    return this.reason === "critic_rejected";
+  }
+
+  /** Nothing to rewrite -- the rule engine found no mechanical fix.
+   *
+   *  Listed so that every `reason` the backend can emit is named somewhere
+   *  in this file. `scripts/test-error-reasons.mjs` enforces that, because
+   *  the comment on `isFinalRefusal` warned a stray reason would fall
+   *  through to the retryable path, and `critic_rejected` then did exactly
+   *  that. A warning in a comment is not a guard. */
+  get isNothingToRewrite(): boolean {
+    return this.reason === "nothing_to_rewrite";
+  }
+
   /** The backend returns 404 both for a missing resume and for one owned by
    *  another user — deliberately indistinguishable. */
   get isNotFound() {

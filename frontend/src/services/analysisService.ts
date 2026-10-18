@@ -1,4 +1,5 @@
 import { http } from "@/api/client";
+import { LLM_REQUEST_TIMEOUT_MS } from "@/lib/env";
 import type { AnalysisOut, AnalysisStepsOut, Finding } from "./types";
 
 /**
@@ -11,7 +12,10 @@ import type { AnalysisOut, AnalysisStepsOut, Finding } from "./types";
  */
 export const analysisService = {
   /** POST /api/resumes/{id}/analyze — runs the graph, returns 201. */
-  run: (resumeId: string) => http.post<AnalysisOut>(`/resumes/${resumeId}/analyze`),
+  run: (resumeId: string) =>
+    http.post<AnalysisOut>(`/resumes/${resumeId}/analyze`, undefined, {
+      timeoutMs: LLM_REQUEST_TIMEOUT_MS,
+    }),
 
   /** GET /api/resumes/{id}/analysis — the most recent stored result.
    *  404 when the resume has never been analysed. */

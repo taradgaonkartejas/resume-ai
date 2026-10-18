@@ -414,6 +414,49 @@ export function useRestoreVersion(resumeId: string | null) {
 }
 
 /**
+ * Single-step undo / redo for the preview toolbar.
+ *
+ * These move the SAME cursor as Decline Changes (`useRestoreVersion`) — the
+ * server keeps one history, not one per control, so an undo after a decline
+ * continues walking backwards instead of disagreeing with it.
+ *
+ * Unlike restore, neither clears `changedRefs`. An undo steps back one
+ * version and the user can step straight forward again with redo; dropping
+ * the highlights would make the change invisible while it is still, from the
+ * user's point of view, part of this sitting. Decline is the control that
+ * ends a sitting, and only it clears them.
+ */
+function useVersionStep(
+  resumeId: string | null,
+  step: (id: string) => Promise<unknown>,
+) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => {
+      if (!resumeId) throw new Error("no resume");
+      return step(resumeId);
+    },
+    onSuccess: () => {
+      if (resumeId) {
+        qc.invalidateQueries({ queryKey: keys.resume(resumeId) });
+        qc.invalidateQueries({ queryKey: keys.analysis(resumeId) });
+        qc.invalidateQueries({ queryKey: keys.versions(resumeId) });
+        qc.invalidateQueries({ queryKey: keys.tailor(resumeId) });
+      }
+      qc.invalidateQueries({ queryKey: keys.resumes });
+    },
+  });
+}
+
+export function useUndo(resumeId: string | null) {
+  return useVersionStep(resumeId, versionService.undo);
+}
+
+export function useRedo(resumeId: string | null) {
+  return useVersionStep(resumeId, versionService.redo);
+}
+
+/**
  * Answering a clarifying question.
  *
  * Shares the invalidation set with useSuggestionAction rather than defining

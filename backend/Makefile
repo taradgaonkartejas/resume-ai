@@ -115,6 +115,9 @@ env:
 env-update:
 	conda env update -f environment.yaml --prune
 
+fetch-models:
+	$(PY) -m app.fetch_models
+
 db-push:
 	$(PY) -m app.cli db push
 

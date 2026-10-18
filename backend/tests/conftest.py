@@ -74,6 +74,27 @@ def _no_provider_keys(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _hashed_embeddings_by_default(monkeypatch):
+    """The suite runs on the hashed embedder.
+
+    Production defaults to MiniLM; the suite does not, for two reasons. It
+    keeps the run fast -- loading a 90 MB ONNX model into ~1300 tests costs
+    far more than the tests it serves -- and it keeps the suite OFFLINE and
+    runnable on a machine where `make fetch-models` has never been run.
+
+    `test_semantic_embeddings.py` opts back in explicitly, and skips with a
+    clear message when the model is absent. A skip there is a real gap, not
+    a pass: it means the semantic gate did not run.
+    """
+    from app.ai import embeddings
+
+    monkeypatch.setattr(settings, "embedding_backend", "hashed", raising=False)
+    embeddings.reset_for_tests()
+    yield
+    embeddings.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _isolated_data_dir(tmp_path, monkeypatch):
     """No test may write into the real `data/` directory.
 

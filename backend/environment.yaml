@@ -31,7 +31,7 @@ dependencies:
       - sqlalchemy==2.0.54
       - psycopg2-binary==2.9.13   # pip, not conda's `psycopg2` — avoids cross-channel confusion
       - pgvector==0.5.0
-      - redis==8.1.0
+      - redis==8.1.0             # LLM response cache; optional at runtime
       - alembic==1.20.0           # schema migrations (make migrate ...)
 
       # psycopg3 is a SEPARATE driver from psycopg2 and both are required:
@@ -59,6 +59,12 @@ dependencies:
       - pypdf==6.19.0            # fallback extractor + page maths
       - pdfplumber==0.11.10      # layout-aware extraction (two-column resumes)
       - python-docx==1.2.0        # imports as `docx`
+      # Local semantic embeddings: all-MiniLM-L6-v2 (384-dim) via ONNX.
+      # fastembed, NOT sentence-transformers+torch: same model and the same
+      # 384 dimensions, ~200 MB of wheels instead of ~2.5 GB. The model file
+      # itself is fetched once by `make fetch-models`, never at analysis time.
+      - fastembed==0.9.0
+
       - fpdf2==2.8.8              # imports as `fpdf`
       - jinja2==3.1.6
 

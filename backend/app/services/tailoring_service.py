@@ -1,7 +1,7 @@
 import logging
 import uuid
 
-from app.models import TailoringSession
+from app.models import Suggestion, TailoringSession
 from app.repositories.agent_run_repository import AgentRunRepository
 from app.repositories.job_description_repository import JobDescriptionRepository
 from app.repositories.resume_repository import ResumeRepository
@@ -124,18 +124,57 @@ class TailoringService:
             trace=outcome["trace"],
         )
 
+        # One suggestion per target_ref.
+        #
+        # Nothing enforced this before, and the writer is free to return two
+        # drafts for one bullet -- typically one per matched keyword. Both
+        # were persisted, so the user saw the SAME original bullet twice,
+        # under the same keyword chip, with two different rewrites and no way
+        # to tell which to take. Accepting one then left the other stale.
+        #
+        # The first draft for a ref wins and later ones merge their keywords
+        # into it rather than creating a row. First rather than "best"
+        # because the drafts arrive in the writer's own order of confidence
+        # and there is no metric here that could rank them honestly.
+        #
+        # The prompt also asks for one rewrite per bullet covering every
+        # applicable keyword, which is the real quality fix -- a single
+        # sentence aware of all its keywords reads coherently where two
+        # independent rewrites cannot. This loop is the guarantee, because
+        # the duplicate existed precisely BECAUSE nothing but a prompt was
+        # asking.
+        first_for_ref: dict[str, Suggestion] = {}
+
         for draft in drafts:
             # Critic hard checks, re-applied at the persistence boundary.
             if not resume_ops.exists(data, draft["target_ref"]):
                 continue
             if resume_ops.resolve(data, draft["target_ref"]) != draft["original_text"]:
                 continue
-            self.suggestions.create(
+
+            ref = draft["target_ref"]
+            existing = first_for_ref.get(ref)
+            if existing is not None:
+                merged = list(existing.keywords or [])
+                for kw in draft["keywords"] or []:
+                    # Case-insensitive, because "SQL" and "sql" arriving from
+                    # two drafts would otherwise both land on one chip row.
+                    if kw and kw.lower() not in {m.lower() for m in merged}:
+                        merged.append(kw)
+                existing.keywords = merged[:8]
+                logger.info(
+                    "tailor: merged a duplicate draft for %s (keywords now %s)",
+                    ref,
+                    merged[:8],
+                )
+                continue
+
+            first_for_ref[ref] = self.suggestions.create(
                 resume_id=resume.id,
                 session_id=session.id,
                 origin="tailor",
                 section=draft["section"],
-                target_ref=draft["target_ref"],
+                target_ref=ref,
                 placement=draft["placement"],
                 original_text=draft["original_text"],
                 suggested_text=draft["suggested_text"],

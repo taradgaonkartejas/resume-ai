@@ -117,7 +117,13 @@ CASES: list[dict] = [
         "id": "summary_too_short",
         "code": "summary.too_short",
         "target_ref": "summary.text",
-        "patch": {"summary.text": "Built platforms for 6 years."},
+        # Was "Built platforms for 6 years." -- which stopped isolating one
+        # finding once tenure stopped counting as a quantified achievement,
+        # so the case tripped summary.no_metric as well and the writer's
+        # result was no longer attributable to a single defect. The case is
+        # about LENGTH, so it now carries a real metric and is simply short.
+        # Tenure-only summaries are covered by test_tenure_not_achievement.py.
+        "patch": {"summary.text": "Cut deploy time by 40%."},
         "expect": "fix",
         "why": "the experience section supplies plenty of material to expand from",
     },

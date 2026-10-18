@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, Loader2, RefreshCw, Sparkles, Wand2 } from "lucide-react";
+import { ChevronDown, History, Loader2, RefreshCw, Sparkles, Wand2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScoreRing } from "@/features/analysis/ScoreRing";
 import { AnalysisStepper } from "@/features/analysis/AnalysisStepper";
@@ -111,7 +111,24 @@ export function AnalysisPane({ resumeId }: { resumeId: string | null }) {
             {findings > 0 && ` · ${findings} recommended improvement${findings === 1 ? "" : "s"}`}
           </p>
           {headline && (
-            <p className="mt-2 text-xs leading-relaxed text-content">{headline}</p>
+            <div className={cn("mt-2", analysis.commentary_stale && "opacity-70")}>
+              {/* The score above is recomputed live; this prose is a snapshot
+                  from the last run. They CAN disagree — "the summary leans on
+                  filler" above a score that just climbed because the filler
+                  was removed reads as a broken product — so the old half is
+                  labelled rather than presented as current. Dimmed, not
+                  hidden: the insight is still worth having. */}
+              {analysis.commentary_stale && (
+                <span
+                  className="mb-1 inline-flex items-center gap-1 rounded-full bg-surface-3 px-2 py-0.5 text-[10px] font-medium text-content-muted"
+                  title="Your resume has changed since this was written. Re-run the analysis to refresh it."
+                >
+                  <History className="size-3" aria-hidden />
+                  From your last analysis
+                </span>
+              )}
+              <p className="text-xs leading-relaxed text-content">{headline}</p>
+            </div>
           )}
           {analysis.role_tags.length > 0 && (
             <div className="mt-2 flex flex-wrap gap-1">

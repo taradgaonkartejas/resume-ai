@@ -1,4 +1,5 @@
 import { http } from "@/api/client";
+import { LLM_REQUEST_TIMEOUT_MS } from "@/lib/env";
 import type { SuggestionBuckets, TailorIn, TailorSessionOut } from "./types";
 
 /**
@@ -13,10 +14,13 @@ import type { SuggestionBuckets, TailorIn, TailorSessionOut } from "./types";
 export const tailorService = {
   /** POST /api/resumes/{id}/tailor — body {jd_title, jd_content}. 201. */
   start: (resumeId: string, jd: TailorIn) =>
-    http.post<TailorSessionOut>(`/resumes/${resumeId}/tailor`, {
-      jd_title: jd.jd_title ?? "",
-      jd_content: jd.jd_content,
-    }),
+    http.post<TailorSessionOut>(
+      `/resumes/${resumeId}/tailor`,
+      { jd_title: jd.jd_title ?? "", jd_content: jd.jd_content },
+      // Multi-agent pass over a model CHAIN; the default 90s is shorter than
+      // the server's worst case and aborted mid-chain. See LLM_REQUEST_TIMEOUT_MS.
+      { timeoutMs: LLM_REQUEST_TIMEOUT_MS },
+    ),
 
   /** GET /api/resumes/{id}/tailor — past sessions, newest first. */
   listSessions: (resumeId: string) =>

@@ -142,12 +142,57 @@ class AnalysisService:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("agent_run telemetry failed: %s", exc)
 
-    def latest(self, resume_id: uuid.UUID, user_id: uuid.UUID) -> AnalysisReport:
-        self._owned(resume_id, user_id)
+    def latest(self, resume_id: uuid.UUID, user_id: uuid.UUID) -> dict:
+        """The stored report, with the DETERMINISTIC half recomputed.
+
+        One number, one way of producing it. The score is a pure function of
+        structured_data (heuristics.py, fixed weights), so serving a copy
+        frozen at the last POST /analyze is serving a second, lying source of
+        truth — and `steps()` directly below already recomputes, which is how
+        the two endpoints came to disagree.
+
+        The bug that forced this: fix recommendations in the guided editor and
+        the score climbs 79 -> 93, because the stepper reads the live steps.
+        Switch to the Tailor tab and back, and the Analyze tab says 79 again,
+        because it reads this row. Nothing is wrong with the cache — an
+        invalidation just refetches the same stale number — and the user is
+        told their fixes did nothing until they press "Improve my resume".
+
+        So the split is drawn where the cost is, not where the storage is:
+
+          deterministic (score, category_scores, notes, findings)
+              -> recomputed here on every call, always current
+          LLM-authored prose (commentary, ats_review, role_tags)
+              -> a genuine snapshot; regenerating costs a model call per
+                 page view, so it keeps its staleness stamp instead
+
+        Returns a dict rather than the ORM row ON PURPOSE. Overlaying the
+        fresh numbers onto the AnalysisReport instance would mark it dirty and
+        the next commit would silently rewrite the stored report, turning a
+        read into a write and destroying the historical record the row exists
+        to be.
+        """
+        resume = self._owned(resume_id, user_id)
         report = self.analyses.latest_for_resume(resume_id)
         if report is None:
             raise NotFoundError("No analysis yet — POST /analyze first")
-        return report
+
+        data = resume.structured_data or {}
+        scored = score_resume(data)
+        # Same helper the guided editor uses, so the two screens cannot
+        # disagree about whether the prose still describes the resume.
+        _, stale = self._commentary_for(resume_id, data)
+
+        return {
+            "id": report.id,
+            "resume_id": report.resume_id,
+            "overall_score": scored["overall_score"],
+            "category_scores": scored["category_scores"],
+            "role_tags": report.role_tags or [],
+            "trace": report.trace or {},
+            "created_at": report.created_at,
+            "commentary_stale": stale,
+        }
 
     def steps(self, resume_id: uuid.UUID, user_id: uuid.UUID) -> dict:
         """The guided editor's step list, scored against the CURRENT resume.

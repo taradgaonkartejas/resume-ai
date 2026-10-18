@@ -51,14 +51,59 @@ const DENSITY: Record<DesignTokens["density"], { gap: string; leading: string }>
 /**
  * A changed range.
  *
- * `--color-mark` (#D1CDFF), never yellow -- the palette forbids it, and on a
- * white page yellow reads as a highlighter pen rather than a diff. Rendered
+ * `--color-change` (green), never yellow -- the palette forbids yellow, and
+ * on a white page it reads as a highlighter pen rather than a diff. Rendered
  * as a real <mark> so the meaning survives for screen readers and for print,
  * with the browser's default background overridden because it IS yellow.
+ *
+ * Green is also the Accept colour, which is a real risk: a green bullet can
+ * be misread as "accepted" rather than "changed". Two things keep them
+ * apart -- accept is a SOLID green fill behind a white label on a control,
+ * this is a PALE green wash behind body text in the document, and the two
+ * never appear on the same surface. The border is what stops the pale wash
+ * dissolving into the page at 80% zoom.
  */
 function Marked({ on, children }: { on: boolean; children: React.ReactNode }) {
   if (!on) return <>{children}</>;
-  return <mark className="rounded-[2px] bg-mark px-0.5 text-on-mark">{children}</mark>;
+  return (
+    <mark
+      className="rounded-[3px] border border-change-border bg-change px-1
+                 text-on-change"
+    >
+      {children}
+    </mark>
+  );
+}
+
+/**
+ * A dashed ring around a block that CONTAINS a change.
+ *
+ * Two treatments carry two different meanings and must not be collapsed into
+ * one: the filled <mark> is "this text changed", the dashed ring is "there is
+ * a change somewhere in here". The ring is what lets a reader find the change
+ * on a dense page before they can read any of it -- scanning for a thin green
+ * fill in a wall of bullets is exactly the problem it solves.
+ *
+ * `outline` rather than `border` deliberately: a border would reflow the
+ * document by its own width, so toggling "Show changes" would shift the page
+ * under the reader's eye.
+ */
+function ChangedBlock({
+  on,
+  children,
+}: {
+  on: boolean;
+  children: React.ReactNode;
+}) {
+  if (!on) return <>{children}</>;
+  return (
+    <div
+      className="rounded-[4px] outline-1 outline-offset-[3px] outline-dashed
+                 outline-change-outline"
+    >
+      {children}
+    </div>
+  );
 }
 
 function SectionHeading({ title, tokens }: { title: string; tokens: DesignTokens }) {
@@ -347,16 +392,22 @@ export function ResumePreview({
 
             {summary.text && (
               <Section title="Summary" tokens={tokens}>
-                <p className={bullet}>
-                  <Marked on={mark(SUMMARY_REF)}>{summary.text}</Marked>
-                </p>
+                <ChangedBlock on={mark(SUMMARY_REF)}>
+                  <p className={bullet}>
+                    <Marked on={mark(SUMMARY_REF)}>{summary.text}</Marked>
+                  </p>
+                </ChangedBlock>
               </Section>
             )}
 
             {experience.length > 0 && (
               <Section title="Experience" tokens={tokens}>
                 {experience.map((job, i) => (
-                  <div key={i} className={i > 0 ? "mt-2" : undefined}>
+                  <ChangedBlock
+                    key={i}
+                    on={job.bullets.some((_, j) => mark(experienceBulletRef(i, j)))}
+                  >
+                  <div className={i > 0 ? "mt-2" : undefined}>
                     <Entry
                       dates={dateLabel(job)}
                       primary={experienceLines(job, tokens.entry === "inline")[0]}
@@ -372,6 +423,7 @@ export function ResumePreview({
                       ))}
                     </ul>
                   </div>
+                  </ChangedBlock>
                 ))}
               </Section>
             )}

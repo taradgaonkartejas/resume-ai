@@ -184,13 +184,53 @@ def test_local_embedding_matches_the_pgvector_column_width():
 
 
 def test_embed_does_not_call_the_network_by_default(monkeypatch):
+    """The intent is NO NETWORK, which `boom` is what actually asserts.
+
+    This used to read `embed(x) == local_embed(x)`, using "equals the hashed
+    embedder" as a proxy for "is local". That proxy broke when the default
+    became MiniLM -- which is also local, also offline, just not hashed. The
+    proxy was wrong, not the default: a local ONNX model makes no network
+    call. The hashed equality is still pinned below, in the scope where it
+    is actually the contract.
+    """
     from app.ai import embeddings
+    from app.config import settings as cfg
 
     def boom(_texts):
         raise AssertionError("remote embedder must not be called by default")
 
-    monkeypatch.setattr(embeddings.llm, "embed_remote", boom)
-    monkeypatch.setattr(embeddings.llm, "is_configured", lambda: True)
+    # Patch the gateway MODULE by path. It is imported lazily inside the
+    # remote branch now, so it is no longer an attribute of the
+    # embeddings module and setattr on that attribute fails outright.
+    monkeypatch.setattr("app.ai.llm.embed_remote", boom)
+    monkeypatch.setattr("app.ai.llm.is_configured", lambda: True)
+
+    vector = embeddings.embed("kubernetes")
+    assert len(vector) == cfg.embedding_dim
+    assert any(v != 0.0 for v in vector), "a degenerate vector is not an embedding"
+
+    batch = embeddings.embed_many(["a", "b"])
+    assert len(batch) == 2
+    assert all(len(v) == cfg.embedding_dim for v in batch)
+
+
+def test_the_hashed_backend_is_exactly_local_embed(monkeypatch):
+    """Pins what the test above used to assert, where it genuinely holds."""
+    from app.ai import embeddings
+    from app.config import settings as cfg
+
+    monkeypatch.setattr(cfg, "embedding_backend", "hashed", raising=False)
+    embeddings.reset_for_tests()
+
+    def boom(_texts):
+        raise AssertionError("remote embedder must not be called")
+
+    # Patch the gateway MODULE by path. It is imported lazily inside the
+    # remote branch now, so it is no longer an attribute of the
+    # embeddings module and setattr on that attribute fails outright.
+    monkeypatch.setattr("app.ai.llm.embed_remote", boom)
+    monkeypatch.setattr("app.ai.llm.is_configured", lambda: True)
+
     assert embeddings.embed("kubernetes") == embeddings.local_embed("kubernetes")
     assert embeddings.embed_many(["a", "b"]) == [
         embeddings.local_embed("a"),
@@ -202,7 +242,7 @@ def test_embeddings_stay_in_one_vector_space(monkeypatch):
     """Consistency is the point: same text in, same vector out, every time."""
     from app.ai import embeddings
 
-    monkeypatch.setattr(embeddings.llm, "is_configured", lambda: True)
+    monkeypatch.setattr("app.ai.llm.is_configured", lambda: True)
     assert embeddings.embed("platform engineer") == embeddings.embed("platform engineer")
 
 

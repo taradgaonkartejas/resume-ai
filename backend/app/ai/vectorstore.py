@@ -16,7 +16,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 
-from app.ai.embeddings import cosine, embed, embed_many
+from app.ai.embeddings import active_backend, cosine, embed, embed_many
 from app.db import has_pgvector
 from app.repositories.vector_repository import GLOBAL_CORPORA, VectorRepository
 from app.services import resume_ops
@@ -56,6 +56,10 @@ class VectorStore:
                 resume_id=resume_id,
                 target_ref=target_ref,
                 placement=placement,
+                # Which space this vector lives in. Hashed and MiniLM are both
+                # 384-wide, so nothing here can detect a mix by shape -- the
+                # cosine just quietly stops meaning anything.
+                doc_metadata={"embedding_backend": active_backend()},
             )
         return len(rows)
 
@@ -73,7 +77,8 @@ class VectorStore:
                 content=entry["content"],
                 embedding=vector,
                 user_id=None,
-                doc_metadata=entry.get("doc_metadata", {}),
+                doc_metadata={**entry.get("doc_metadata", {}),
+                              "embedding_backend": active_backend()},
             )
         return len(entries)
 
@@ -146,6 +151,9 @@ class VectorStore:
         docs = self.repo.candidates(corpus, user_id=user_id, resume_id=resume_id)
         if not docs:
             return []
+        docs = _same_space_only(docs, corpus)
+        if not docs:
+            return []
         vector = embed(query)
         scored = [
             Hit(
@@ -159,3 +167,38 @@ class VectorStore:
         ]
         scored.sort(key=lambda h: h.score, reverse=True)
         return scored[:k]
+
+
+def _same_space_only(docs: list, corpus: str) -> list:
+    """Drop rows embedded by a different backend, loudly.
+
+    Two embedding spaces in one index make cosine similarity meaningless --
+    worse than either space used consistently -- and because every backend
+    here is 384-dimensional the mistake is invisible at the storage layer.
+    Rows predating the stamp have no backend recorded and are treated as
+    foreign: a vector of unknown provenance cannot be compared safely.
+    """
+    current = active_backend()
+    keep: list = []
+    foreign: dict[str, int] = {}
+    for doc in docs:
+        recorded = (doc.doc_metadata or {}).get("embedding_backend")
+        if recorded == current:
+            keep.append(doc)
+        else:
+            # Name the backends of the EXCLUDED rows. Reporting the first
+            # doc's backend produced "embedded by 'hashed', not 'hashed'",
+            # because the first doc is usually one that matched.
+            label = recorded or "an older build (no backend recorded)"
+            foreign[label] = foreign.get(label, 0) + 1
+    if foreign:
+        logger.warning(
+            "%d of %d rows in corpus %r were excluded from this search: "
+            "embedded by %s, but the active backend is %r. Run "
+            "`python -m app.cli db reset` to re-embed.",
+            sum(foreign.values()), len(docs), corpus,
+            ", ".join(f"{name} ({n})" for name, n in sorted(foreign.items())),
+            current,
+        )
+    return keep
+

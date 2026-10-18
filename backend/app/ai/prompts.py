@@ -41,6 +41,11 @@ Hard rules, in order of importance:
 3. Keep the candidate's voice. Do not inflate seniority.
 4. Keep the rewrite under 30 words and start with a strong action verb.
 5. Preserve any existing metric exactly. Never fabricate a new number.
+6. ONE rewrite per bullet. If several job-description keywords apply to the
+   same bullet, write a single sentence that carries all of them and list
+   them together -- do not return the same bullet twice with different
+   wording. Two rewrites of one line cannot both be accepted, and a reader
+   given two versions of their own sentence has no way to choose.
 
 Similar bullets from this candidate's own history, for tone:
 {context}"""
@@ -122,10 +127,35 @@ original to contradict; judge it against the resume.
 Whether a fact EXISTS is judged against the whole resume. What the rewrite
 may CLAIM with that fact is judged against the ORIGINAL line.
 
+THE [__] BLANK. Some rewrites deliberately contain the literal
+token [__]. It is NOT a figure and NOT a claim: it is an empty slot
+the candidate fills in by hand before the resume is sent, and the tool
+refuses to export while one remains. Writers are forbidden from guessing a
+number, so restructuring a line to make room for one is the correct and
+intended behaviour.
+
+So do not reject a rewrite merely for containing [__], and do not
+treat it as an invented metric -- that would make the blank impossible to
+produce. Judge the sentence AROUND the blank instead:
+
+- APPROVE when the original already claims the thing being measured and the
+  blank only quantifies it.
+    "Improved query performance" -> "Improved query performance by
+    [__]%" is approved: the improvement is the original's claim and
+    only its size is left open.
+- REJECT when the blank introduces a dimension the resume never establishes,
+  because the sentence then asserts that new thing and leaves only its size
+  blank.
+    "Deployed the platform" -> "Deployed the platform across [__]
+    countries" is rejected: nothing in the resume says countries, so the
+    rewrite claims international deployment regardless of the blank.
+
+Say which of those two it is in your notes, so the writer can correct it.
+
 Report a rewrite as NOT approved when it:
 - claims experience absent from the resume
 - introduces a technology the resume does not mention or clearly imply
-- invents or alters a metric
+- invents or alters a metric (a [__] blank is not a metric -- see above)
 - changes the meaning of the original rather than its phrasing
 - inflates the seniority or scope the original states
 - claims a larger share of the work than the original states. "Helped to work

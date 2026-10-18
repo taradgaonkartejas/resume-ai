@@ -143,6 +143,7 @@ function Show-Help {
     Write-Host "  The browser app is configured separately in frontend\.env.local." -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "AI transport (needs NVIDIA_API_KEY / GROQ_API_KEY in backend\.env)" -ForegroundColor Yellow
+    Write-Host "  fetch-models        download the local embedding model (once, ~90 MB)"
     Write-Host "  models              which models the key can actually call"
     Write-Host "  cov                 coverage, hermetic (no API calls)"
     Write-Host "  test-live           ALSO run tests that call real providers"
@@ -253,6 +254,7 @@ switch ($Target.ToLowerInvariant()) {
     'migrate-status' { Invoke-Cli @('migrate', 'status') }
     'migrate-down'   { Invoke-Cli @('migrate', 'down') }
 
+    'fetch-models'   { Invoke-Py @('-m', 'app.fetch_models') }
     'models'         { Invoke-Py @('-m', 'scripts.check_model_access') }
     'models-gen-all' {
         Invoke-Py @('-m', 'scripts.check_model_access', '--generate-all', $Provider)

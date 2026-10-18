@@ -175,7 +175,26 @@ class Settings(BaseSettings):
     # For a 5-user local deployment over a small corpus, one consistent space
     # beats a 24% chance of a better one.
     embeddings_remote: bool = False
+    # Which embedder runs: "minilm" (local all-MiniLM-L6-v2 via fastembed,
+    # 384-dim, semantic), "hashed" (deterministic bag-of-words, no network,
+    # no semantics -- used by the test suite), or "remote".
+    #
+    # 384 is not a coincidence: it is MiniLM's output width and was already
+    # the pgvector column width, so the semantic upgrade needs no migration.
+    #
+    # Switching backends makes every stored vector meaningless -- two spaces
+    # in one index make cosine similarity nonsense -- so a change here
+    # requires `python -m app.cli db reset`. Rows record the backend that
+    # produced them and a search refuses to mix them.
+    embedding_backend: str = "minilm"
     llm_timeout_seconds: int = 45
+    # Redis response cache for deterministic tasks (extraction, jd_analysis,
+    # scoring, ats). NEVER the writer: it runs at temperature 0.4 so that the
+    # "try again" on a critic rejection can produce a different draft.
+    # Off by default -- a cache that appears without being asked for is a
+    # cache nobody knows to invalidate. The app runs identically with Redis
+    # stopped; failures degrade to a miss.
+    llm_cache_enabled: bool = False
     critic_max_revisions: int = 2
 
     # Data

@@ -114,6 +114,15 @@ export function RecommendationCard({
   const rewrite = useRewriteSection(resumeId ?? null);
   const [draft, setDraft] = useState<SuggestionOut | null>(null);
   const [dismissedPreset, setDismissedPreset] = useState(false);
+  // How many times the fact-checker has thrown a draft away for THIS card.
+  //
+  // Each press is already three drafts -- rewrite_for_finding makes two
+  // informed attempts server-side and the critic judges each. A writer that
+  // reached for an invented detail once tends to reach for it again, so
+  // after two presses the honest move is to stop offering the button and
+  // point at the manual edit. The user who reported this pressed it three
+  // times and got three identical 422s.
+  const [objections, setObjections] = useState(0);
   const shownDraft = draft ?? (dismissedPreset ? null : (presetDraft ?? null));
 
   // A rejected or accepted draft returns the card to idle. Accept also makes
@@ -132,7 +141,17 @@ export function RecommendationCard({
   const start = (regenerate = false) =>
     rewrite.mutate(
       { targetRef: finding.target_ref, findingId: finding.id, regenerate },
-      { onSuccess: setDraft },
+      {
+        onSuccess: (d) => {
+          setObjections(0);
+          setDraft(d);
+        },
+        onError: (err) => {
+          if (err instanceof ApiError && err.isReviewerObjection) {
+            setObjections((n) => n + 1);
+          }
+        },
+      },
     );
 
   // Resolved cards collapse to an acknowledgement. The two-column
@@ -304,17 +323,43 @@ export function RecommendationCard({
             <div className="mt-2.5" role="alert">
               {/* A refusal and an outage are not the same news. Only the
                   former is the user's problem, so only the former is red. */}
-              <p
-                className={
-                  "text-xs leading-relaxed " +
-                  (rewrite.error instanceof ApiError && rewrite.error.isTransient
-                    ? "text-content-muted"
-                    : "text-reject-text")
-                }
-              >
-                {(rewrite.error as Error)?.message ??
-                  "Could not draft a revision for this."}
-              </p>
+              {/* Three different pieces of news, three treatments.
+
+                  An outage is nobody's fault and goes grey. A refusal is the
+                  user's problem and goes red. A REVIEWER OBJECTION is
+                  neither: nothing is broken and the user did nothing wrong
+                  -- the fact-checker stopped a rewrite that would have put an
+                  invented claim on a resume. Painting that red teaches
+                  distrust at the exact moment the tool is protecting them,
+                  so it is framed as the safety net doing its job. */}
+              {rewrite.error instanceof ApiError &&
+              rewrite.error.isReviewerObjection ? (
+                <div className="rounded-md border border-line-soft bg-surface-2 p-2">
+                  <p className="text-xs font-medium text-content">
+                    Blocked by the fact-checker
+                  </p>
+                  <p className="mt-1 text-xs leading-relaxed text-content-muted">
+                    {rewrite.error.message}
+                  </p>
+                  <p className="mt-1.5 text-[11px] leading-relaxed text-content-muted">
+                    {objections >= 2
+                      ? "The writer keeps reaching for a detail your resume does not support. Editing this one by hand will be faster."
+                      : "Your resume has to support every claim, so the draft was discarded rather than shown to you. Wording varies between attempts, so trying again may work."}
+                  </p>
+                </div>
+              ) : (
+                <p
+                  className={
+                    "text-xs leading-relaxed " +
+                    (rewrite.error instanceof ApiError && rewrite.error.isTransient
+                      ? "text-content-muted"
+                      : "text-reject-text")
+                  }
+                >
+                  {(rewrite.error as Error)?.message ??
+                    "Could not draft a revision for this."}
+                </p>
+              )}
               <div className="mt-1.5 flex items-center gap-3">
                 {/* "Try again" only when trying again could work.
                     rewrite_for_finding already makes two informed attempts
@@ -324,7 +369,10 @@ export function RecommendationCard({
                     to 422 -- the corpus grades that refusal as correct
                     behaviour. Offering a retry there is an invitation to a
                     dead end; the useful affordance is "Go to field". */}
-                {!(rewrite.error instanceof ApiError && rewrite.error.isFinalRefusal) && (
+                {!(
+                  rewrite.error instanceof ApiError && rewrite.error.isFinalRefusal
+                ) &&
+                  objections < 2 && (
                   <button
                     type="button"
                     onClick={() => start()}

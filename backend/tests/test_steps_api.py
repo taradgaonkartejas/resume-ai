@@ -125,7 +125,26 @@ def test_fixing_a_field_raises_the_score_by_the_promised_points(client, priya):
 
 
 def test_steps_reflect_edits_immediately_without_reanalysing(client, priya):
-    """Steps are live; a stale cached report would break the whole flow."""
+    """Steps are live; a stale cached report would break the whole flow.
+
+    REVERSED, deliberately. This test used to end with
+
+        assert frozen == stale, "stored report should stay frozen until re-analyse"
+
+    asserting that GET /analysis keeps replaying the last run. That was the
+    design, and it was wrong: it made the Analyze tab contradict the guided
+    editor on the same resume in the same sitting -- fix recommendations, see
+    79 -> 93 in the stepper, switch tabs and back, and the pane says 79 again.
+    Reported from the running app.
+
+    The score is a pure function of structured_data, so the two endpoints had
+    no business holding separate answers. GET /analysis now recomputes the
+    deterministic half, and the assertion below pins the agreement instead.
+
+    The original claim is not discarded, it is moved to the layer where it is
+    still true: the stored ROW stays frozen, because a read must not rewrite
+    history. `tests/test_analysis_score_is_live.py` pins that.
+    """
     rid = new_resume(client, priya, "Weak", WEAK)
     client.post(f"/api/resumes/{rid}/analyze", headers={"X-User-Id": priya})
     stale = client.get(f"/api/resumes/{rid}/analysis",
@@ -136,10 +155,12 @@ def test_steps_reflect_edits_immediately_without_reanalysing(client, priya):
                headers={"X-User-Id": priya})
 
     live = _steps(client, priya, rid)["overall_score"]
-    frozen = client.get(f"/api/resumes/{rid}/analysis",
-                        headers={"X-User-Id": priya}).json()["overall_score"]
+    reported = client.get(f"/api/resumes/{rid}/analysis",
+                          headers={"X-User-Id": priya}).json()["overall_score"]
     assert live > stale, "steps did not pick up the edit"
-    assert frozen == stale, "stored report should stay frozen until re-analyse"
+    assert reported == live, (
+        "the Analyze tab and the guided editor disagree about the same resume"
+    )
 
 
 def test_steps_are_user_scoped(client, arjun, priya_resume):

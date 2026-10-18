@@ -17,6 +17,7 @@ from app.services.exceptions import (
     UnsupportedFormat,
     ValidationError,
 )
+from app.services.heuristics import score_resume
 from app.services.parsing import parse_advisories
 from app.services.resume_ops import (
     REORDERABLE_SECTIONS,
@@ -51,13 +52,28 @@ class ResumeService:
         return self.resumes.db
 
     def list_resumes(self, user_id: uuid.UUID) -> list[dict]:
-        """Library rows, including each resume's latest strength score.
+        """Library rows, including each resume's current strength score.
 
         Returns plain dicts rather than ORM objects because overall_score is
-        not a column. Scores come from ONE grouped query, not one per card.
+        not a column.
+
+        The grouped query still runs, but only to answer "has this resume ever
+        been analysed?" — the number itself is recomputed from the live
+        structured_data, exactly as GET /analysis and /analysis/steps do. A
+        card showing the score from the last POST /analyze sat next to a tab
+        showing the current one, on the same resume, disagreeing.
+
+        `None` is preserved for a resume with no report, because "never
+        analysed" is a distinct state the library renders differently ("Run an
+        analysis to see your score"). The score is computable without a report,
+        but inventing one here would erase that state.
+
+        Cost: scoring is pure and in-memory, run once per card. Against a
+        5-user local deployment that is cheaper than the N+1 the grouped query
+        was written to avoid.
         """
         resumes = self.resumes.list_for_user(user_id)
-        scores = self.resumes.latest_scores([r.id for r in resumes])
+        analysed = self.resumes.latest_scores([r.id for r in resumes])
         return [
             {
                 "id": r.id,
@@ -69,7 +85,11 @@ class ResumeService:
                 "tailored_for": r.tailored_for,
                 "version_cursor": r.version_cursor,
                 "updated_at": r.updated_at,
-                "overall_score": scores.get(r.id),
+                "overall_score": (
+                    score_resume(r.structured_data or {})["overall_score"]
+                    if r.id in analysed
+                    else None
+                ),
                 "structured_data": r.structured_data or {},
             }
             for r in resumes

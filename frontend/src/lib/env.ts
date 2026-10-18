@@ -41,6 +41,26 @@ function readTimeout(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 90_000;
 }
 
+/**
+ * Budget for requests that run the LLM chain, as opposed to a plain read.
+ *
+ * These two numbers were independent and that was the bug. The server tries a
+ * CHAIN of models and spends up to `LLM_TIMEOUT_SECONDS` on each, so its worst
+ * case is `timeout x chain length` -- currently 45s x 4 = 180s for `writing`.
+ * The browser gave up at 90s, which is less than ONE attempt when a stale
+ * .env set LLM_TIMEOUT_SECONDS=90. The user saw "Request timed out after
+ * 90000 ms" while the backend was still working, and the models that would
+ * have answered were never reached.
+ *
+ * So this is deliberately larger than the server's worst case rather than a
+ * round number: a client that aborts mid-chain converts a slow success into a
+ * failure, and retrying costs the whole chain again.
+ *
+ * It is NOT the default for every request -- a hung GET should fail fast, not
+ * hang a screen for four minutes. Only the LLM-backed mutations opt in.
+ */
+export const LLM_REQUEST_TIMEOUT_MS = 240_000;
+
 export const env = {
   /** "/api" (same origin) or an absolute origin ending in /api. */
   apiBaseUrl: readBaseUrl(),

@@ -85,11 +85,40 @@ def test_a_well_formed_draft_passes():
 
 
 def test_an_existing_figure_may_be_kept_alongside_the_placeholder():
-    """The fix must not cost the resume a number it already had."""
+    """The fix must not cost the resume a number it already had.
+
+    The example changed when `check_draft` gained the new-content-word rule.
+    It used to end "...Kubernetes, cutting deploy time [__]%", which the
+    stricter rule refuses -- correctly. The original line never claims deploy
+    time was cut, so that draft asserts a BENEFIT and leaves only its size
+    blank, which is structurally the same move as the "serving [__] users"
+    failure reported from a real resume.
+
+    The intent of this test is that the existing `40` survives the rewrite,
+    and that is unchanged and still asserted. Only the vehicle moved.
+    """
     assert ph.check_draft(
         "Led migration of 40 services to Kubernetes",
-        "Led migration of 40 services to Kubernetes, cutting deploy time [__]%",
+        "Led migration of 40 services to Kubernetes in [__] weeks",
     ) is None
+
+
+def test_a_draft_may_not_add_an_unclaimed_benefit():
+    """The boundary the test above used to sit on the wrong side of.
+
+    Kept explicitly so the decision is visible rather than implied by an
+    edited example: adding a plausible upside is still adding a claim. This
+    is deliberately strict, and it is affordable because the complaint is
+    retryable -- `rewrite_for_finding` feeds it back and returns attempt two
+    regardless, so the cost of being wrong here is one model call, not a
+    dead end for the user.
+    """
+    complaint = ph.check_draft(
+        "Led migration of 40 services to Kubernetes",
+        "Led migration of 40 services to Kubernetes, cutting deploy time [__]%",
+    )
+    assert complaint is not None
+    assert "deploy" in complaint or "cutting" in complaint
 
 
 # ----------------------------------------------------------- finding wiring
