@@ -5,16 +5,20 @@ INCONCLUSIVE if the chain collapsed, FAIL on an escaped fabrication, WARN on
 a contained one, otherwise exit 0. So a writer that changed nothing at all
 scored
 
-    fix rate           0/7
-    resisted inventing 3/3
+    fix rate           0/8      (7/7 before the projects corpus case, 2026-10-25)
+    resisted inventing 3/3      (4/4 until the projects decline case retired
+                                 with the projects metric check, same day)
     FABRICATIONS       0   (must be 0)
 
 and exited 0. Silence passed every safety metric perfectly while being
 useless -- the identical vacuity hole already found in ats_report.py and
 closed there with MIN_CORRECT_RATE.
 
-The measured baseline this protects is 7/7 fix, 7/7 reaching the user, 0
-fabrications, on codecraft:claude-sonnet-5 in a clean single-model run.
+The measured baseline this protects was 7/7 fix, 7/7 reaching the user, 0
+fabrications, on codecraft:claude-sonnet-5 in a clean single-model run. The
+corpus gained a projects rewrite case on 2026-10-25 (projects became a scored
+category), so the fixable pool is 8 wide now; the numbers everywhere in this
+file shifted by one, the RATES did not.
 """
 
 from __future__ import annotations
@@ -77,22 +81,25 @@ def test_it_fails_on_the_floor_not_on_independence(capsys):
     _run(_unchanged, ["writer_report", "--llm"])
     out = capsys.readouterr().out
     assert "INCONCLUSIVE" not in out
-    assert "fix rate 0/7 is below the floor" in out
+    assert "fix rate 0/8 is below the floor" in out
 
 
 def test_the_offline_rule_writer_is_exempt(capsys):
-    """`make writer-report` pins the rule writer at exactly 2/7 by design.
+    """`make writer-report` pins the rule writer at exactly 3/8 by design.
 
     It is a deterministic fallback, not a writer, so an LLM floor applied to
     it fails the build on correct behaviour -- the first version of this gate
-    did exactly that, and running it is the only reason I found out.
+    did exactly that, and running it is the only reason I found out. (2/8
+    became 3/8 on 2026-10-25 when the projects weak-verb patch text kept its
+    tool name for the new scoring matrix: \"Responsible for building…\" is a
+    reorder _rule_rewrite handles.)
     """
     with mock.patch.object(sys, "argv", ["writer_report"]):
         code = writer_report.main()
     out = capsys.readouterr().out
-    assert "fix rate           2/7" in out, "the rule writer's pinned score moved"
+    assert "fix rate           3/8" in out, "the rule writer's pinned score moved"
     assert "below the floor" not in out, "the LLM floor leaked into offline mode"
-    assert code == 0, "the offline report must stay green at 2/7"
+    assert code == 0, "the offline report must stay green at 3/8"
 
 
 @pytest.mark.parametrize("name", ["MIN_FIX_RATE", "MIN_REACHES_USER"])

@@ -1,6 +1,9 @@
+import copy
+import logging
 import uuid
 
 from app.models import Suggestion
+from app.repositories.chat_repository import ChatRepository
 from app.repositories.resume_repository import ResumeRepository
 from app.repositories.suggestion_repository import SuggestionRepository
 from app.repositories.tailoring_repository import TailoringRepository
@@ -19,6 +22,14 @@ from app.services.exceptions import (
 )
 from app.services.heuristics import match_keywords, score_resume
 from app.services.version_service import VersionService
+
+logger = logging.getLogger(__name__)
+
+#: Sentinel target_ref marking the chat skills PICKER, which can land in
+#: several groups and therefore has no single ref. Distinct from the
+#: tailoring clarifying card, which is also section="skills" but carries an
+#: empty target_ref and asks about exactly one keyword.
+SKILLS_PICKER_REF = "skills"
 
 TERMINAL = {"accepted", "rejected"}
 
@@ -58,11 +69,16 @@ class SuggestionService:
         resumes: ResumeRepository,
         sessions: TailoringRepository,
         versions: VersionService,
+        chats: ChatRepository | None = None,
     ) -> None:
         self.suggestions = suggestions
         self.resumes = resumes
         self.sessions = sessions
         self.versions = versions
+        # Optional so every existing construction site keeps working; when it
+        # is absent the transcript simply gains no entry. Mirroring must never
+        # be able to fail an edit the user asked for.
+        self.chats = chats
 
     @property
     def db(self):
@@ -141,6 +157,10 @@ class SuggestionService:
         return suggestion
 
     # --------------------------------------------- clarifying questions (Inc 6)
+    def get(self, suggestion_id: uuid.UUID, user_id: uuid.UUID) -> Suggestion:
+        """One owned suggestion, or 404. No state change."""
+        return self._require(suggestion_id, user_id)
+
     def answer_question(
         self,
         suggestion_id: uuid.UUID,
@@ -180,6 +200,14 @@ class SuggestionService:
             raise InvalidStateTransition(
                 f"This card is {suggestion.status}, not a question."
             )
+
+        # A skills PICKER is a multiple choice over a server-supplied list,
+        # not a free-text claim about one keyword, so it resolves on its own
+        # path. Discriminated by target_ref, not by section: the tailoring
+        # clarifying-question flow also uses section="skills" (with an empty
+        # target_ref), and matching on section hijacked all of it.
+        if suggestion.target_ref == SKILLS_PICKER_REF:
+            return self._answer_skills(suggestion, user_id, answer or "")
 
         keyword = (suggestion.keywords or [""])[0] or ""
         answer = (answer or "").strip()
@@ -409,8 +437,53 @@ class SuggestionService:
             # the card can label it "written without AI".
             critic_notes="" if outcome.used_llm else "written without AI",
         )
+        self._log_fix_requested(resume, target_ref, finding, suggestion)
         self.db.commit()
         return suggestion
+
+    def _log_fix_requested(self, resume, target_ref, finding, suggestion) -> None:
+        """Mirror a Fix/Rewrite with AI click into the chat transcript.
+
+        Two rows, matching what the user asked for: their click recorded as a
+        TURN, then the draft as an event.
+
+        The turn is written with role "user" deliberately. It is a thing the
+        user did, and it is also useful context -- the history builder replays
+        `content` into the next prompt, so the assistant knows a fix for this
+        section was already requested. `meta.kind` lets the pane mark it as a
+        button press rather than typing, so the transcript does not claim they
+        typed something they clicked.
+
+        The draft's explanation is the writer's OWN `reasoning`, not freshly
+        generated prose: a second model call per click would spend the 45s
+        budget again for text we already have.
+        """
+        if self.chats is None:
+            return
+        try:
+            label = (finding or {}).get("message") or f"Improve {target_ref}"
+            self.chats.append(
+                resume.id,
+                "user",
+                f"Fix with AI: {label}",
+                meta={"kind": "fix_requested", "target_ref": target_ref},
+            )
+            self.chats.append_event(
+                resume.id,
+                "suggestion_drafted",
+                suggestion.reasoning or "Drafted a revision for your review.",
+                suggestion_id=suggestion.id,
+                target_ref=target_ref,
+                origin="analysis",
+                placement=suggestion.placement or "",
+                draft_text=suggestion.suggested_text or "",
+                # Nothing is applied yet. The pane renders the ordinary
+                # Accept/Reject card off suggestion_id, so the Epic 5 review
+                # path stays the only way text reaches the resume.
+                applied=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - logging must not break the fix
+            logger.warning("chat mirror failed for %s: %s", target_ref, exc)
 
     def _pending_analysis(self, resume_id: uuid.UUID, target_ref: str):
         return (
@@ -424,6 +497,117 @@ class SuggestionService:
             .first()
         )
 
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _norm(text: str) -> str:
+        return "".join(ch for ch in str(text).lower() if ch.isalnum())
+
+    @classmethod
+    def _group_for(cls, keyword: str, groups: list[dict]) -> int | None:
+        """Index of the skill group this keyword belongs with, or None.
+
+        Matched against what the user has ALREADY written rather than a
+        hard-coded taxonomy: "java8/17/21" belongs with "Java" because the
+        resume says so, not because a lookup table claims Java is a language.
+        A taxonomy would be one more thing to be wrong and to maintain.
+        """
+        target = cls._norm(keyword)
+        if not target:
+            return None
+        best, best_score = None, 0
+        for i, group in enumerate(groups):
+            if not isinstance(group, dict):
+                continue
+            for item in group.get("items") or []:
+                a = cls._norm(item)
+                if not a:
+                    continue
+                if a == target:
+                    return i
+                if (a in target or target in a) and len(a) >= 3 and len(a) > best_score:
+                    best, best_score = i, len(a)
+            label = cls._norm(group.get("label") or "")
+            if label and (label in target or target in label) and best_score == 0:
+                best, best_score = i, 1
+        return best
+
+    def _answer_skills(self, suggestion, user_id: uuid.UUID, answer: str):
+        """Apply exactly the skills the user selected -- and nothing else.
+
+        The selection arrives as text so the existing answer endpoint and its
+        decline semantics work unchanged. Every entry is checked back against
+        the keywords the SERVER put on the card: a client cannot widen the
+        list into "add whatever I post".
+
+        Applied here rather than left pending. The user already made an
+        explicit per-skill choice; asking them to accept a card afterwards
+        would be a second review of a decision they just made.
+        """
+        by_norm = {self._norm(k): str(k) for k in (suggestion.keywords or [])}
+
+        selected: list[str] = []
+        for raw in str(answer).replace("\n", ",").split(","):
+            key = self._norm(raw)
+            if key and key in by_norm and by_norm[key] not in selected:
+                selected.append(by_norm[key])
+
+        suggestion.answer = str(answer).strip()
+
+        # Declining is a first-class outcome, not an error.
+        if not selected:
+            suggestion.status = "rejected"
+            self.db.commit()
+            return suggestion
+
+        resume = self.resumes.get_owned(suggestion.resume_id, user_id)
+        if resume is None:
+            raise SuggestionNotFound(str(suggestion.id))
+
+        data = resume.structured_data or {}
+        before = copy.deepcopy(data)
+        groups = [g for g in (data.get("skills") or []) if isinstance(g, dict)]
+
+        patched = data
+        spillover: list[str] = []
+        for skill in selected:
+            idx = self._group_for(skill, groups)
+            if idx is None:
+                spillover.append(skill)
+                continue
+            ref = f"skills.{idx}.items"
+            current = (
+                resume_ops.resolve(patched, ref)
+                if resume_ops.exists(patched, ref)
+                else ""
+            )
+            items = [i.strip() for i in str(current).split(",") if i.strip()]
+            if any(self._norm(i) == self._norm(skill) for i in items):
+                continue
+            items.append(skill)
+            patched = resume_ops.apply_patch(patched, ref, ", ".join(items))
+
+        if spillover:
+            skills = list(patched.get("skills") or [])
+            skills.append({"label": "Additional Skills", "items": spillover})
+            patched = {**patched, "skills": skills}
+
+        resume.structured_data = patched
+        self.versions.record(
+            resume,
+            patched,
+            # Never "chat": these are the user's own claims, and the version
+            # log has to stay able to answer "did a model write this?".
+            change_source="attested",
+            label=f"Added skills: {', '.join(selected)}",
+        )
+        suggestion.suggested_text = ", ".join(selected)
+        suggestion.attested = True
+        suggestion.status = "accepted"
+
+        self._log_accepted(resume, suggestion, before, patched, ", ".join(selected))
+        self.db.commit()
+        return suggestion
 
     def act(
         self,
@@ -511,8 +695,47 @@ class SuggestionService:
                 session.matched_keywords = scores["matched_keywords"]
                 session.gap_keywords = scores["gap_keywords"]
 
+        self._log_accepted(resume, suggestion, data, patched, text)
+
         self.db.commit()
         return suggestion
+
+    def _log_accepted(
+        self, resume, suggestion, before: dict, after: dict, applied_text: str = ""
+    ) -> None:
+        """Mirror an accepted edit into the chat transcript.
+
+        Inside the same transaction as the write, so the log cannot record an
+        edit that was rolled back. Wrapped anyway: a transcript entry is never
+        worth failing the edit the user actually asked for.
+        """
+        if self.chats is None:
+            return
+        try:
+            before_score = score_resume(before)["overall_score"]
+            after_score = score_resume(after)["overall_score"]
+            self.chats.append_event(
+                resume.id,
+                "suggestion_accepted",
+                f"Applied to {suggestion.target_ref}.",
+                suggestion_id=suggestion.id,
+                target_ref=suggestion.target_ref,
+                origin=suggestion.origin or "tailor",
+                score_before=before_score,
+                score_after=after_score,
+                # The pane shows a score card only when the number MOVED.
+                # Emitting "+0 points" after every accept trains the user to
+                # ignore the card.
+                score_delta=after_score - before_score,
+                # Snapshotted, not looked up through suggestion_id at render
+                # time. The transcript is a log: it must keep showing what was
+                # applied AT THIS MOMENT even after the row is edited again,
+                # reverted, or the text replaced by a later suggestion.
+                applied_text=applied_text,
+                placement=suggestion.placement or "",
+            )
+        except Exception as exc:  # noqa: BLE001 - logging must not break editing
+            logger.warning("chat mirror failed for %s: %s", suggestion.id, exc)
 
     # ------------------------------------------------------------------
     def accept_all(

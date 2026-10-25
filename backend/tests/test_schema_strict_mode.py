@@ -84,7 +84,14 @@ def test_the_check_catches_the_bug_that_shipped():
     ]
 
 
-def test_scoring_commentary_still_carries_the_four_categories():
-    """The fix must not quietly drop data the UI reads."""
+def test_scoring_commentary_carries_all_six_categories():
+    """The fix must not quietly drop data the UI reads.
+
+    Six since 2026-10-25: the ATS table added skills and projects as scored
+    categories, and contact/format stay in the commentary so the advisory
+    gates can still be explained.
+    """
     notes = schemas.CategoryNotes()
-    assert set(notes.model_dump()) == {"contact", "summary", "experience", "format"}
+    assert set(notes.model_dump()) == {
+        "contact", "summary", "skills", "experience", "projects", "format",
+    }

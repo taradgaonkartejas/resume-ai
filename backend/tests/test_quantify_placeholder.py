@@ -2,8 +2,13 @@
 
 `summary.no_metric` and `experience.unquantified_bullets` are cleared only by
 a number, and the writer must never invent one. Rather than refuse, it
-restructures the line so a figure fits and leaves a blank the candidate
-fills in -- which asserts nothing and so cannot fabricate anything.
+restructures the line so a figure fits and leaves a blank the candidate fills
+in -- which asserts nothing and so cannot fabricate anything.
+
+`projects.unquantified_bullets` was a third member for one day (2026-10-25):
+the Projects step moved to the ATS Project Scoring Matrix -- tech stack,
+verb+tool phrasing, skills redundancy -- which carries no metric arm at all,
+so the finding cannot fire and there is nothing to route here.
 
 These tests pin the two properties that make that safe (exactly one
 placeholder, no new digits) and the guard that stops a resume leaving the
@@ -22,7 +27,10 @@ def test_the_placeholder_is_what_every_layer_expects():
     assert ph.PLACEHOLDER == "[__]"
 
 
-def test_both_metric_findings_use_the_quantify_path():
+def test_all_metric_findings_use_the_quantify_path():
+    # Exactly two: the projects finding was retired the same 2026-10-25 the
+    # Projects step moved to the ATS matrix (no quantified check), so nothing
+    # in the projects category routes here any more.
     assert ph.QUANTIFY_FINDINGS == {
         "summary.no_metric",
         "experience.unquantified_bullets",
@@ -136,13 +144,19 @@ def _resume_without_metrics():
                 "Maintained the continuous deployment pipeline",
             ],
         }],
-        "projects": [],
+        # The projects entry is metric-shaped on purpose: the retired
+        # projects.unquantified_bullets finding must NOT light up here any
+        # more, and with Kubernetes also listed as a skill the redundancy
+        # bonus is earned, so the projects category stays quiet.
+        "projects": [{"name": "Sidecar", "bullets": [
+            "Built a cost-estimation helper for Kubernetes namespaces",
+        ]}],
         "education": [{"school": "S", "degree": "BSc", "dates": "2016"}],
-        "skills": [{"label": "P", "items": ["Python", "Go"]}],
+        "skills": [{"label": "P", "items": ["Python", "Go", "Kubernetes"]}],
     }
 
 
-def test_the_two_metric_findings_now_offer_an_action():
+def test_all_metric_findings_now_offer_an_action():
     """They carried action="" precisely because the fix was a number.
 
     The placeholder mechanism is what makes an action honest here, so the
@@ -158,9 +172,14 @@ def test_the_two_metric_findings_now_offer_an_action():
             f"{fid} must use the placeholder path, not a plain rewrite"
         )
 
+    # ...and the retired projects finding is the regression it must never
+    # reintroduce: no quantified check for Projects (owner, 2026-10-25).
+    assert "projects.unquantified_bullets" not in by_id
+
 
 def test_no_other_finding_was_given_the_quantify_action():
-    """Scope is two cards. A third would be a silent widening."""
+    """Scope is the three cards in QUANTIFY_FINDINGS. A fourth would be a
+    silent widening past the placeholder mechanism that makes it safe."""
     result = score_resume(_resume_without_metrics())
     quantify = {f["id"] for f in result["findings"] if f.get("action") == "quantify"}
     assert quantify <= ph.QUANTIFY_FINDINGS

@@ -1,16 +1,18 @@
 /**
- * Profile-link labels.
+ * Profile-link helpers shared by the preview and the editor.
  *
- * A resume that writes "LinkedIn" over a hyperlink is doing the right thing,
- * and every surface should reproduce that rather than printing a
- * 54-character URL into the contact header.
+ * Display decision (2026-10-24, user-directed): links render as brand-label
+ * hyperlinks ("LinkedIn", "GitHub") on PDF / DOCX / preview — what every
+ * reference resume does — while TXT keeps the short address, because it has
+ * no annotation layer and would otherwise lose the URL with the label.
+ * Round-trip stays safe: the parser reads link annotations, not text.
  *
- * This table is mirrored in `backend/app/services/resume_ops.py`
- * (`PROFILE_HOSTS`). The two are pinned together by
- * `backend/tests/test_profile_links.py`, which reads this file — so a host
- * added on one side and not the other fails the suite rather than quietly
- * rendering a bare domain in one export and a label in another.
+ * This reverses the earlier "address, not label" ruling; the evidence both
+ * times is in the git log, and the twin table lives in resume_ops.py
+ * (PROFILE_HOSTS). The two tables must stay identical.
  */
+
+/** Host → display label. Mirrors PROFILE_HOSTS in resume_ops.py. */
 export const PROFILE_HOSTS: Record<string, string> = {
   "linkedin.com": "LinkedIn",
   "github.com": "GitHub",
@@ -31,57 +33,32 @@ export const PROFILE_HOSTS: Record<string, string> = {
   "scholar.google.com": "Google Scholar",
 };
 
-/** Bare lowercase host: no scheme, no `www.`, no port, no credentials. */
-export function hostOf(url: string): string {
-  const rest = url.split("://").pop() ?? url;
-  const host = (rest.split("/")[0] ?? "")
-    .split("?")[0]
-    .split("#")[0]
-    .split("@")
-    .pop()!
-    .split(":")[0]
-    .toLowerCase();
-  return host.startsWith("www.") ? host.slice(4) : host;
-}
-
-/** The allowlist key this URL belongs to, or null.
- *
- *  Subdomains count — `gist.github.com` is still GitHub — but a plain suffix
- *  match would also accept `github.com.phishing.ru`, so it is anchored on a
- *  dot boundary. */
-export function knownHost(url: string): string | null {
-  const host = hostOf(url);
-  for (const key of Object.keys(PROFILE_HOSTS)) {
-    if (host === key || host.endsWith("." + key)) return key;
-  }
-  return null;
-}
-
-/** "https://www.linkedin.com/in/tejas-taradgaonkar" -> "LinkedIn" */
-export function profileLabel(url: string): string {
-  const key = knownHost(url);
-  return key ? PROFILE_HOSTS[key] : hostOf(url) || url;
-}
-
-/** Ensure a bare "linkedin.com/in/x" is still a navigable href. */
+/** Make a bare host usable as an href. */
 export function hrefFor(url: string): string {
   return /^https?:\/\//i.test(url) ? url : `https://${url}`;
 }
 
 /**
- * Pair each URL with its label, disambiguating collisions.
+ * https://www.linkedin.com/in/username/ -> linkedin.com/in/username
  *
- * Two GitHub links both labelled "GitHub" would be indistinguishable, so a
- * repeated label takes the last path segment: "GitHub (taradgaonkartejas)".
+ * Mirrors short_url() in resume_ops.py; the preview has to show exactly
+ * what the exporter will print.
  */
-export function labelLinks(urls: string[]): { url: string; label: string }[] {
-  const labels = urls.map(profileLabel);
-  return urls.map((url, i) => {
-    let label = labels[i];
-    if (labels.filter((l) => l === label).length > 1) {
-      const tail = (url.split("://").pop() ?? "").split("/").slice(1).filter(Boolean);
-      if (tail.length) label = `${label} (${tail[tail.length - 1]})`;
-    }
-    return { url, label };
-  });
+export function shortUrl(url: string): string {
+  return (url ?? "")
+    .trim()
+    .replace(/^https?:\/\//i, "")
+    .replace(/^www\./i, "")
+    .replace(/\/+$/, "");
+}
+
+/**
+ * The word printed for a link. Mirrors link_label() in resume_ops.py:
+ * recognised profile hosts get their brand name; anything else falls back
+ * to the short address (an unrecognised URL is the only information a
+ * reader has, and printing "Website" would hide it).
+ */
+export function linkLabel(url: string): string {
+  const host = shortUrl(url).split("/", 1)[0].toLowerCase();
+  return PROFILE_HOSTS[host] ?? shortUrl(url);
 }

@@ -46,6 +46,12 @@ Hard rules, in order of importance:
    them together -- do not return the same bullet twice with different
    wording. Two rewrites of one line cannot both be accepted, and a reader
    given two versions of their own sentence has no way to choose.
+7. Every keyword you claim in `keywords` must appear VERBATIM in the
+   rewritten bullet. Claiming a keyword the sentence does not literally
+   contain rescues nothing -- the match score is recomputed from the text.
+8. Never delete a term from the original bullet that is already a job-
+   description keyword. Tightening ("automated contract testing" -> "testing")
+   that drops a matched keyword makes the resume score WORSE after accepting.
 
 Similar bullets from this candidate's own history, for tone:
 {context}"""
@@ -60,6 +66,11 @@ Hard rules, in order of importance:
 3. Do not inflate seniority or scope. "Contributed to" must not become "Led".
 4. Do not introduce a technology the original does not mention.
 5. Keep the candidate's voice. {length_rule}
+   Write plainly: one idea per sentence, no clause-chained run-ons, and none
+   of the AI-tell vocabulary reviewers flag ("delve", "seamlessly",
+   "meticulously", "leverage", "robust", "passionate", "cutting-edge",
+   "furthermore", "moreover", "pivotal", "fast-paced world"). Plain words for
+   real work beat impressive-sounding filler.
 
 Fix ONLY the stated problem. If you cannot fix it without inventing something,
 return the original text unchanged and say so in the reasoning.
@@ -183,8 +194,18 @@ Relevant context from this candidate's resume:
 
 
 ATS_REVIEW = """You are an expert on how applicant tracking systems (Workday, \
-Taleo, Greenhouse) parse resumes. You are given skill tokens from one \
-resume that are written only as an acronym. Expand the ones you are sure of.
+Taleo, Greenhouse) parse resumes, and on what a plausible metric looks like \
+for a given kind of engineering work. You may be given skill tokens from \
+one resume that are written only as an acronym; expand the ones you are \
+sure of.
+
+You may also be given resume bullets that contain a metric, keyed by \
+reference. For each number, judge plausibility for the kind of work the \
+bullet describes -- "10 jobs/hour" is plausible for bespoke page builds and \
+absurd for a Kafka consumer. When a number looks implausible, flag it in \
+`plausibility` with the bullet reference, the metric quoted verbatim, and \
+one or two sentences of advice. Default to silence: a plausible number gets \
+no entry at all.
 
 Rules:
 - You do not score anything. You only explain and suggest.
@@ -192,6 +213,8 @@ Rules:
 expansion is how the credential is normally written. Prefer the form \
 "Project Management Professional (PMP)". If a token is already the normal \
 name of the technology, skip it.
+- For plausibility, quote the metric exactly as written -- never retype \
+or round it -- and only reference bullets from the list provided.
 - Never invent skills, employers, dates or credentials the resume does not \
 already contain.
 

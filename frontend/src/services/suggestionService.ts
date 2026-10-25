@@ -30,6 +30,10 @@ export const suggestionService = {
    * `confirmed` is the bare Yes button and is only accepted when
    * `requires_text` is false.
    */
+  /** GET /api/suggestions/{id} -- live status for a card known only by id. */
+  get: (suggestionId: string) =>
+    http.get<SuggestionOut>(`/suggestions/${suggestionId}`),
+
   answer: (suggestionId: string, body: { answer?: string; confirmed?: boolean }) =>
     http.post<SuggestionOut>(`/suggestions/${suggestionId}/answer`, {
       answer: body.answer ?? "",

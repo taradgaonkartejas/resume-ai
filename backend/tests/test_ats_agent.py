@@ -54,7 +54,7 @@ def test_clean_resume_never_calls_a_model(monkeypatch):
     monkeypatch.setattr(agents.llm, "structured", explode)
     out = agents.review_ats(CLEAN)
     assert out.used_llm is False
-    assert out.value == {"expansions": [], "note": ""}
+    assert out.value == {"expansions": [], "plausibility": [], "note": ""}
 
 
 def test_candidates_are_found_when_present():
@@ -117,7 +117,7 @@ def test_without_a_key_the_feature_goes_quiet_rather_than_guessing():
     """
     out = agents.review_ats(MESSY)
     assert out.used_llm is False
-    assert out.value == {"expansions": [], "note": ""}
+    assert out.value == {"expansions": [], "plausibility": [], "note": ""}
 
 
 def test_a_model_failure_falls_back_rather_than_raising(monkeypatch):
@@ -164,4 +164,4 @@ def test_the_score_is_identical_with_and_without_the_agent():
 def test_graph_always_produces_a_review(data):
     state = graphs.run_analysis(data)
     assert "ats_review" in state
-    assert set(state["ats_review"]) == {"expansions", "note"}
+    assert set(state["ats_review"]) == {"expansions", "plausibility", "note"}

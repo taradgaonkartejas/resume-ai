@@ -12,6 +12,7 @@ from app.services import resume_ops
 from app.services.analysis_service import _require_parsed
 from app.services.exceptions import ResumeNotFound, ValidationError
 from app.services.heuristics import extract_keywords, match_keywords
+from app.services.text_match import canonical_aliases, contains
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +146,13 @@ class TailoringService:
         # asking.
         first_for_ref: dict[str, Suggestion] = {}
 
+        # The deterministic writer's drafts weave their keywords in
+        # literally, but the LLM writer is free to claim a keyword it only
+        # gestured at. Both checks below run at the persistence boundary,
+        # against the same session's own data, for every path that lands a
+        # draft here.
+        baseline_matched = {m.lower() for m in scores["matched_keywords"]}
+
         for draft in drafts:
             # Critic hard checks, re-applied at the persistence boundary.
             if not resume_ops.exists(data, draft["target_ref"]):
@@ -153,6 +161,49 @@ class TailoringService:
                 continue
 
             ref = draft["target_ref"]
+
+            # Claim honesty (2026-10-25, reported from a live session: a
+            # card claimed "java full stack development" and "database
+            # management" while its rewrite contained neither). Because the
+            # percent is RECOMPUTED from the text on every accept, a claim
+            # that is not literally in the suggested text cannot ever count
+            # -- it would sit on the card forever, lying.
+            claimed = draft.get("keywords") or []
+            suggested = draft["suggested_text"]
+            verified = [
+                kw for kw in claimed
+                if any(contains(suggested, s) for s in canonical_aliases(kw))
+            ]
+
+            # Regression guard (same report: accepting two rewrites moved
+            # the match 38% -> 25%). A rewrite is allowed to tighten a
+            # bullet, never to delete the sentence's only JD keyword --
+            # simulate the patch and refuse any draft that costs the resume
+            # a previously MATCHED keyword. Deterministic, like the critic
+            # hard checks above: a prompt could only ask for this.
+            patched = resume_ops.apply_patch(data, ref, suggested)
+            after = match_keywords(patched, keywords)["matched_keywords"]
+            after_matched = {m.lower() for m in after}
+            lost = sorted(baseline_matched - after_matched)
+            if lost:
+                logger.info(
+                    "tailor: refusing draft for %s -- it would delete "
+                    "matched keyword(s): %s",
+                    ref, lost,
+                )
+                continue
+            if claimed and not verified:
+                # The entire point of a tailor suggestion is integrating the
+                # claimed keywords. A rewrite that does it for none of them
+                # is at best a style edit wearing a keyword chip.
+                logger.info(
+                    "tailor: refusing draft for %s -- none of its claimed "
+                    "keyword(s) appear in the text: %s",
+                    ref, claimed,
+                )
+                continue
+            draft["keywords"] = verified
+
             existing = first_for_ref.get(ref)
             if existing is not None:
                 merged = list(existing.keywords or [])
@@ -184,6 +235,40 @@ class TailoringService:
                 grounded=True,
             )
 
+        # Backfill (same 2026-10-25 report): when the honesty guards refuse
+        # the LLM's drafts wholesale, the user previously saw an EMPTY
+        # tailor pane -- a silent regression disguised as a fix. Any gap
+        # keyword no persisted draft covers gets a deterministic draft here:
+        # the ", using X" writer quotes its keywords in the text, so its
+        # claims verify by construction and its text deletes nothing.
+        covered = {
+            k.lower()
+            for s in first_for_ref.values()
+            for k in (s.keywords or [])
+        }
+        uncovered = [g for g in scores["gap_keywords"] if g.lower() not in covered]
+        if uncovered and len(first_for_ref) < MAX_SUGGESTIONS:
+            for d in self._draft_suggestions(data, uncovered):
+                if len(first_for_ref) >= MAX_SUGGESTIONS:
+                    break
+                ref = d["target_ref"]
+                if ref in first_for_ref:
+                    continue
+                first_for_ref[ref] = self.suggestions.create(
+                    resume_id=resume.id,
+                    session_id=session.id,
+                    origin="tailor",
+                    section=d["section"],
+                    target_ref=ref,
+                    placement=d["placement"],
+                    original_text=d["original_text"],
+                    suggested_text=d["suggested_text"],
+                    keywords=d["keywords"],
+                    reasoning=d["reasoning"],
+                    status="pending",
+                    grounded=True,
+                )
+
         # Gaps the writer could not draft for, because the resume holds no
         # evidence of them. Until now these ended as grey chips: the system
         # knew exactly what was missing and asked nobody. A keyword the user
@@ -195,8 +280,8 @@ class TailoringService:
 
         drafted = {
             k.lower()
-            for draft in drafts
-            for k in (draft.get("keywords") or [])
+            for s in first_for_ref.values()
+            for k in (s.keywords or [])
         }
         for q in questions_for_gaps(scores["gap_keywords"], jd_content):
             # Do not ask about something the writer already worked in.
@@ -318,7 +403,7 @@ class TailoringService:
                     "target_ref": target_ref,
                     "placement": placement,
                     "original_text": text,
-                    "suggested_text": text.rstrip(".") + f", leveraging {joined}.",
+                    "suggested_text": text.rstrip(".") + f", using {joined}.",
                     "keywords": chunk,
                     "reasoning": f"Adds missing job-description keyword(s): {joined}.",
                 }

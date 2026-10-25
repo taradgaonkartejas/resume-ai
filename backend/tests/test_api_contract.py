@@ -98,6 +98,8 @@ def test_templates_seeded(client):
         "minimal",
         "balanced",
         "technical",
+        "sidebar",
+        "banner",
     }
 
 
@@ -120,7 +122,13 @@ def test_templates_carry_design_tokens(client):
         "divider",
         "header",
         "entry",
-        "skill_columns",
+        "entry_lead",
+        "layout",
+        "entry_sep",
+        "edu",
+        "dates_style",
+        "icons",
+        "edu_lead",
     }
     for template in templates:
         tokens = template["design_tokens"]
@@ -134,7 +142,16 @@ def test_templates_carry_design_tokens(client):
         assert tokens["density"] in {"airy", "normal", "dense"}
         assert tokens["header"] in {"stacked", "split"}
         assert tokens["entry"] in {"stacked", "inline"}
-        assert tokens["skill_columns"] in {1, 2, 3}
+        assert tokens["entry_lead"] in {"role", "company"}
+        assert tokens["layout"] in {"single", "sidebar"}
+        assert tokens["edu"] in {"stacked", "inline"}
+        assert tokens["entry_sep"]
+        assert tokens["dates_style"] in {"plain", "italic"}
+        assert isinstance(tokens["icons"], bool)
+        assert tokens["edu_lead"] in {"degree", "school"}
+        # Icons are drawn beside the heading text; a sidebar-style heading's
+        # drawn bar already occupies that slot, so pairing them would stack.
+        assert not (tokens["icons"] and tokens["heading"] in {"sidebar", "boxed"})
         # A split header only makes sense with a left-aligned name: centring
         # the name and floating contact right would collide.
         if tokens["header"] == "split":

@@ -11,6 +11,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ExportButton } from "@/features/export/ExportButton";
 import { UserSwitcher } from "@/app/UserSwitcher";
 import { ThemeToggle } from "@/app/ThemeToggle";
 import { ResumePreview } from "@/features/preview/ResumePreview";
@@ -291,6 +292,8 @@ export function MyResumes() {
                           <Target className="size-4" aria-hidden />
                           {r.kind === "tailored" ? "Continue Tailoring" : "Tailor to a job"}
                         </Button>
+
+                        <ExportButton resumeId={r.id} title={r.title} label={null} />
 
                         <div className="relative">
                           <button

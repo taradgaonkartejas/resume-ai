@@ -51,8 +51,22 @@ export interface DesignTokens {
   header: TemplateHeader;
   /** "stacked" = role above company; "inline" = "Role - Company" on one line. */
   entry: TemplateEntry;
-  /** Skills grid width, 1-3 columns. */
-  skill_columns: number;
+  /** Which line carries the dates: the role, or the employer. */
+  entry_lead: "role" | "company";
+  /** "sidebar" moves skills/education/extras into a right rail. */
+  layout: "single" | "sidebar";
+  /** Separator between role and company on an inline entry row. */
+  entry_sep: string;
+  /** "inline" folds school into the degree row; location moves beside dates. */
+  edu: "stacked" | "inline";
+  /** Reference templates set the floated-right dates in italic. */
+  dates_style: "plain" | "italic";
+  /** Outline icons beside section headings + contact items (vector in the
+   *  PDF, inline SVG here -- never text, so re-import never sees them). */
+  icons: boolean;
+  /** Stacked education order: headline the degree, or the school (executive
+   *  reference / fix-list defect 9). The inline fold does not reverse. */
+  edu_lead: "degree" | "school";
 }
 
 export interface TemplateOut {
@@ -97,6 +111,13 @@ export interface ExperienceEntry {
   /** Derived. Do not write. */
   dates: string;
   bullets: string[];
+  /** Italic one-liner under the entry header: context for an unfamiliar
+   *  employer ("Bootstrapped SaaS unicorn"). Data-only -- the parser never
+   *  recovers it from a PDF, so a re-imported resume loses it. */
+  descriptor?: string;
+  /** One bold line with dates, no bullets -- for older roles that no longer
+   *  carry the story. Data-only for the same reason. */
+  condensed?: boolean;
 }
 
 /** Projects use `name` where experience uses company/role — parsing.py
@@ -240,6 +261,12 @@ export interface DeleteOut {
 export interface CategoryScore {
   score: number;
   max: number;
+  /**
+   * True for the two 0-point gates (contact = knockout filter, format =
+   * pass/fail parser blocker, 2026-10-25 ruling): findings still surface,
+   * but no points hang off them, and the category cannot prop up the score.
+   */
+  advisory?: boolean;
   notes: string[];
   findings?: Finding[];
 }
@@ -285,6 +312,11 @@ export interface AnalysisStep {
   finding_count: number;
   /** "optional" marks a navigable step that carries no points (extras). */
   status: "clear" | "minor" | "attention" | "optional";
+  /**
+   * True for the 0-point gates (contact = knockout filter, format = pass/fail
+   * parser blocker): findings emit, nothing is added to the score.
+   */
+  advisory?: boolean;
   findings: Finding[];
 }
 
@@ -316,12 +348,26 @@ export interface AnalysisStepsOut {
   commentary_stale: boolean;
 }
 
-/** Scoring categories. Every Finding belongs to exactly one. */
-export type CategoryKey = "contact" | "summary" | "experience" | "format";
+/**
+ * Scoring categories. Every Finding belongs to exactly one.
+ *
+ * 2026-10-25 ATS table: summary+education 10, skills 30, experience 45,
+ * projects 15. `contact` and `format` remain categories, but advisory-only:
+ * they are the knockout filter and the pass/fail parser blocker, worth 0
+ * points, emitting findings without ever moving the score. Projects moved
+ * from navigable-unscored to a scored category under the same ruling.
+ */
+export type CategoryKey =
+  | "contact"
+  | "summary"
+  | "skills"
+  | "experience"
+  | "projects"
+  | "format";
 
 /**
- * Step ids. A superset of CategoryKey: "extras" is navigable but unscored and
- * NEVER emits findings, which is why Finding.category stays CategoryKey.
+ * Step ids. A superset of CategoryKey: "extras" is navigable but unscored
+ * and NEVER emits findings, which is why Finding.category stays CategoryKey.
  */
 export type StepKey = CategoryKey | "extras";
 
@@ -341,7 +387,21 @@ export interface AtsExpansion {
  */
 export interface AtsReview {
   expansions: AtsExpansion[];
+  /**
+   * Tier 2: is this number plausible for the work described? Judgement the
+   * deterministic rules cannot make ("cut p95 by 100%" IS judged by a rule;
+   * "10 jobs/hour on a microservices pipeline" needs the domain knowledge
+   * only a model has). Advisory only — no points, ever.
+   */
+  plausibility: AtsMetricAdvisory[];
   note: string;
+}
+
+/** One plausibility advisory. `quote` is verbatim text from the bullet. */
+export interface AtsMetricAdvisory {
+  bullet: string;
+  quote: string;
+  advice: string;
 }
 
 /** Prose from ScoringAgent. The number is never the LLM's to decide. */
@@ -501,12 +561,43 @@ export interface SuggestionBuckets {
 
 /* ---------- chat ---------- */
 
+/**
+ * Structured payload on a chat row.
+ *
+ * Present on `event` rows (edits mirrored from the Analyze/Tailor panes) and
+ * on the synthetic `user` turn a "Fix with AI" click writes. Empty `{}` for
+ * ordinary typed conversation.
+ */
+export interface ChatMessageMeta {
+  kind?:
+    | "fix_requested"
+    | "suggestion_drafted"
+    | "suggestion_accepted"
+    /** The AI agent could not be reached; this reply came from the rules. */
+    | "agent_unreachable";
+  retryable?: boolean;
+  /** Scrubbed provider failure, e.g. "LLMUnavailable: All models failed...". */
+  reason?: string;
+  target_ref?: string;
+  origin?: string;
+  applied?: boolean;
+  placement?: string;
+  /** Snapshot of the text as applied -- not a live read of the suggestion. */
+  applied_text?: string;
+  draft_text?: string;
+  score_before?: number;
+  score_after?: number;
+  score_delta?: number;
+}
+
 export interface ChatMessageOut {
   id: string;
   resume_id: string;
+  /** "user" | "assistant" | "event". */
   role: string;
   content: string;
   suggestion_id: string | null;
+  meta?: ChatMessageMeta;
   created_at: string;
 }
 
@@ -616,5 +707,11 @@ export const DEFAULT_DESIGN_TOKENS: DesignTokens = {
   divider: false,
   header: "stacked",
   entry: "stacked",
-  skill_columns: 1,
+  entry_lead: "role",
+  layout: "single",
+  entry_sep: " - ",
+  edu: "stacked",
+  dates_style: "plain",
+  icons: false,
+  edu_lead: "degree",
 };

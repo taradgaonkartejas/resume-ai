@@ -47,11 +47,17 @@ class CategoryNotes(BaseModel):
     single analysis, and the only trace was a line in the server log.
     """
 
+    # 2026-10-25: the scoring table grew — skills and projects are scored
+    # categories now, so the contract names them too. Keeping contact/format
+    # fields lets the model acknowledge advisory-only findings; the strengths
+    # filter zeroes them either way.
     model_config = ConfigDict(extra="forbid")
 
     contact: str = ""
     summary: str = ""
+    skills: str = ""
     experience: str = ""
+    projects: str = ""
     format: str = ""
 
 
@@ -75,7 +81,9 @@ class CategoryStrengths(BaseModel):
 
     contact: list[str] = Field(default_factory=list)
     summary: list[str] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
     experience: list[str] = Field(default_factory=list)
+    projects: list[str] = Field(default_factory=list)
     format: list[str] = Field(default_factory=list)
 
 
@@ -87,7 +95,8 @@ class ScoringCommentary(BaseModel):
     headline: str = Field(description="One-sentence verdict")
     category_notes: CategoryNotes = Field(
         default_factory=CategoryNotes,
-        description="Per-category advice for contact, summary, experience, format",
+        description=("Per-category advice for summary, skills, experience, "
+                     "projects; contact and format are advisory checks"),
     )
     # Rides on the SAME call as the notes above, so "What's Working Well"
     # costs no extra tokens and cannot disagree with the commentary beside
@@ -238,6 +247,25 @@ class SkillExpansion(BaseModel):
     expanded: str = ""
 
 
+class MetricAdvisory(BaseModel):
+    """A judgement call about one number on the resume. Never a score.
+
+    The model's job is plausibility -- "10 jobs/hour sounds low for a
+    microservices pipeline". This is deliberately NOT a Finding: a Finding
+    carries points, and a second opinion that wanders run to run cannot be
+    allowed to move a number that must be reproducible.
+    """
+
+    bullet: str = Field(
+        description="Exactly 'exp_N.bullet_M' as given in the input list"
+    )
+    quote: str = Field(
+        description="The metric text verbatim -- the number and its unit, "
+        "short enough to sit inside one clause"
+    )
+    advice: str = Field(description="One or two sentences of advice")
+
+
 class AtsReview(BaseModel):
     """Judgement calls about machine-readability. Never a score.
 
@@ -249,6 +277,7 @@ class AtsReview(BaseModel):
     """
 
     expansions: list[SkillExpansion] = Field(default_factory=list)
+    plausibility: list[MetricAdvisory] = Field(default_factory=list)
     note: str = ""
 
     @classmethod

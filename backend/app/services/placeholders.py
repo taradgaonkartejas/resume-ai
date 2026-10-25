@@ -30,8 +30,17 @@ import re
 PLACEHOLDER = "[__]"
 
 #: Findings whose fix is a number only the candidate has.
+#:
+#: `projects.unquantified_bullets` sat here for one day (2026-10-25) and was
+#: removed the same day when the owner fixed the Projects step on the ATS
+#: Project Scoring Matrix: projects are scored on tech-stack density, verb+
+#: tool phrasing and the skills redundancy bonus -- never on metric impact,
+#: so the projects scorer emits no quantified finding to route here.
 QUANTIFY_FINDINGS = frozenset(
-    {"summary.no_metric", "experience.unquantified_bullets"}
+    {
+        "summary.no_metric",
+        "experience.unquantified_bullets",
+    }
 )
 
 _DIGITS_RE = re.compile(r"\d+(?:\.\d+)?")

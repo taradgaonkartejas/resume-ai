@@ -1,4 +1,4 @@
-import { ArrowRight, ScanSearch } from "lucide-react";
+import { ArrowRight, CircleHelp, ScanSearch } from "lucide-react";
 import type { AtsReview } from "@/services";
 
 /**
@@ -20,9 +20,10 @@ import type { AtsReview } from "@/services";
  */
 export function AtsReviewCard({ review }: { review: AtsReview }) {
   const expansions = review?.expansions ?? [];
+  const plausibility = review?.plausibility ?? [];
   const note = review?.note?.trim() ?? "";
 
-  if (expansions.length === 0 && !note) return null;
+  if (expansions.length === 0 && plausibility.length === 0 && !note) return null;
 
   return (
     <section className="rounded-xl border border-line-soft bg-surface-2 p-4">
@@ -59,6 +60,33 @@ export function AtsReviewCard({ review }: { review: AtsReview }) {
                 </span>
                 <ArrowRight className="size-3 text-content-muted" aria-hidden />
                 <span className="min-w-0 text-content">{item.expanded}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {plausibility.length > 0 && (
+        <div className="mt-3 space-y-2">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-warning">
+            Numbers worth a second look
+          </p>
+          <ul className="space-y-1.5">
+            {plausibility.map((item) => (
+              <li
+                key={`${item.bullet}-${item.quote}`}
+                className="rounded-lg border border-line-soft bg-surface-1 px-3 py-2 text-xs"
+              >
+                <p className="flex items-center gap-1.5">
+                  <CircleHelp
+                    className="size-3 shrink-0 text-warning"
+                    aria-hidden
+                  />
+                  <span className="rounded bg-surface-3 px-1.5 py-0.5 font-medium">
+                    {item.quote}
+                  </span>
+                </p>
+                <p className="mt-1 text-content-muted">{item.advice}</p>
               </li>
             ))}
           </ul>

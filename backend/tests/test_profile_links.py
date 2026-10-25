@@ -1,4 +1,4 @@
-"""Profile links: harvesting, labelling, and the TS/Python parity pin.
+"""Profile links: harvesting them from a PDF, and carrying them into exports.
 
 The bug these cover: a resume whose contact line reads
 
@@ -10,59 +10,15 @@ layer, which `extract_text` discarded. `contact.links` parsed empty,
 links that were sitting in the uploaded file.
 """
 
-import re
 from pathlib import Path
-
-import pytest
 
 from app.services.export_service import _add_hyperlink
 from app.services.parsing import extract_links, merge_extracted_links, structure_text
 from app.services.resume_ops import (
-    PROFILE_HOSTS,
-    _known_host,
-    label_links,
-    profile_label,
     to_plain_text,
 )
 
 _TS = Path(__file__).resolve().parents[2] / "frontend" / "src" / "lib" / "links.ts"
-
-
-# ----------------------------------------------------------------- labelling
-@pytest.mark.parametrize(
-    "url,label",
-    [
-        ("https://www.linkedin.com/in/tejas-taradgaonkar", "LinkedIn"),
-        ("https://github.com/taradgaonkartejas", "GitHub"),
-        ("http://GitHub.com/Someone", "GitHub"),
-        # Subdomains are the same service.
-        ("https://gist.github.com/x/1", "GitHub"),
-        ("https://in.linkedin.com/in/x", "LinkedIn"),
-        # Unknown host degrades to the bare domain, never a raw URL.
-        ("https://tejas.dev/portfolio", "tejas.dev"),
-        ("https://www.example.co.uk/a/b", "example.co.uk"),
-    ],
-)
-def test_a_url_becomes_the_name_of_the_service(url, label):
-    assert profile_label(url) == label
-
-
-def test_a_lookalike_domain_is_not_the_real_one():
-    """A plain suffix match would make `github.com.evil.ru` read as GitHub."""
-    assert _known_host("https://github.com.phishing.ru/x") is None
-    assert profile_label("https://github.com.phishing.ru/x") == "github.com.phishing.ru"
-
-
-def test_two_links_to_the_same_service_stay_distinguishable():
-    """Two runs both labelled "GitHub" would be indistinguishable."""
-    pairs = label_links(
-        ["https://github.com/alpha", "https://github.com/beta"]
-    )
-    assert [p[1] for p in pairs] == ["GitHub (alpha)", "GitHub (beta)"]
-
-
-def test_a_single_link_is_not_disambiguated():
-    assert label_links(["https://github.com/alpha"])[0][1] == "GitHub"
 
 
 # ------------------------------------------------------- harvesting from PDF
@@ -163,7 +119,7 @@ def test_an_anchor_word_is_not_mistaken_for_a_place():
 
 
 # --------------------------------------------------------------- the exports
-def test_plain_text_carries_the_labels():
+def test_plain_text_carries_the_addresses():
     text = to_plain_text(
         {
             "contact": {
@@ -172,9 +128,11 @@ def test_plain_text_carries_the_labels():
             }
         }
     )
-    assert "LinkedIn · GitHub" in text
-    # Chosen deliberately: plain text cannot hyperlink, so only labels survive.
-    assert "https://" not in text
+    # Was "LinkedIn · GitHub". The TXT export is the ATS paste target, and a
+    # reader of it alone could not reach a profile from a bare label.
+    assert "linkedin.com/in/jane" in text
+    assert "github.com/jane" in text
+    assert "https://" not in text, "the scheme is noise in a paste box"
 
 
 def test_docx_hyperlink_builds_a_real_external_relationship():
@@ -190,18 +148,4 @@ def test_docx_hyperlink_builds_a_real_external_relationship():
         "github.com/jane" in r._target
         for r in document.part.rels.values()
         if r.is_external
-    )
-
-
-# ----------------------------------------------- the TS/Python parity pin
-def test_the_typescript_table_matches_the_python_one():
-    """Two copies of a lookup table drift. A host added to one and not the
-    other would render a label in the PDF and a bare domain in the preview."""
-    src = _TS.read_text(encoding="utf-8")
-    block = src.split("PROFILE_HOSTS: Record<string, string> = {", 1)[1].split("};", 1)[0]
-    ts = dict(re.findall(r'"([^"]+)":\s*"([^"]+)"', block))
-    assert ts == PROFILE_HOSTS, (
-        "frontend/src/lib/links.ts and resume_ops.PROFILE_HOSTS disagree: "
-        f"only in TS={set(ts) - set(PROFILE_HOSTS)}, "
-        f"only in Python={set(PROFILE_HOSTS) - set(ts)}"
     )

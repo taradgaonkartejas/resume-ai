@@ -164,8 +164,13 @@ export function TailorPane({
         )}
 
         <p className="mt-3 border-t border-line-soft pt-2 text-[11px] text-content-muted">
-          Job title, education and keywords that do not apply to you are not
-          changed by tailoring, so they do not count against your progress.
+          Keyword match is section-weighted like an ATS reads it:
+          experience&nbsp;45%&nbsp;· skills&nbsp;30%&nbsp;· projects&nbsp;15%&nbsp;·
+          summary&nbsp;&amp;&nbsp;education&nbsp;10% — the same keyword counts
+          more when it is proven inside a job than merely listed in your
+          skills section. Job title, education and keywords that do not
+          apply to you are not changed by tailoring, so they do not count
+          against your progress.
         </p>
       </div>
 

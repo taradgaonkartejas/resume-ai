@@ -397,13 +397,23 @@ export function RecommendationCard({
           )}
         </div>
 
-        <Badge
-          variant="secondary"
-          className="shrink-0 bg-brand/15 font-semibold tabular-nums text-brand-text"
-          title={`${severity.label} — resolving this raises your score by ${finding.points}`}
-        >
-          +{finding.points}
-        </Badge>
+        {finding.points > 0 ? (
+          <Badge
+            variant="secondary"
+            className="shrink-0 bg-brand/15 font-semibold tabular-nums text-brand-text"
+            title={`${severity.label} — resolving this raises your score by ${finding.points}`}
+          >
+            +{finding.points}
+          </Badge>
+        ) : (
+          <Badge
+            variant="secondary"
+            className="shrink-0 bg-warning/15 font-semibold text-warning"
+            title={`${severity.label} — an advisory gate check; it moves no points`}
+          >
+            gate
+          </Badge>
+        )}
       </div>
 
       {/* The revision. Same component the Tailor pane uses, so Accept /

@@ -97,8 +97,11 @@ def test_the_rule_writer_never_invents_a_number(case):
 def test_rule_writer_scores_exactly_as_expected():
     """Headline numbers, so a regression is one line in the diff.
 
-    3/7 is not good. It is a measurement, and it is the number the live writer
-    has to beat to justify the API call.
+    3/8 is not good. It is a measurement, and it is the number the live writer
+    has to beat to justify the API call. (Third fix arrived 2026-10-25: the
+    projects weak-verb patch text was reworded to keep its tool name under
+    the new Projects scoring matrix, and \"Responsible for building…\" is a
+    shape _rule_rewrite can reorder.)
     """
     fixed = 0
     for case in to_fix():
@@ -116,8 +119,8 @@ def test_rule_writer_scores_exactly_as_expected():
         }:
             fixed += 1
 
-    assert fixed == 2, (
-        f"rule writer fixed {fixed}/{len(to_fix())}; expected exactly 2. "
+    assert fixed == 3, (
+        f"rule writer fixed {fixed}/{len(to_fix())}; expected exactly 3. "
         "If you improved _rule_rewrite, update this number deliberately."
     )
 

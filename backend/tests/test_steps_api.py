@@ -23,12 +23,14 @@ def _steps(client, user_id, resume_id):
     return r.json()
 
 
-def test_steps_returns_five_ordered_steps(client, priya, priya_resume):
+def test_steps_returns_seven_ordered_steps(client, priya, priya_resume):
+    """2026-10-25 table: skills/projects became scored steps; contact/format
+    became advisory gates that add 0 to the denominator."""
     body = _steps(client, priya, priya_resume)
     assert [s["id"] for s in body["steps"]] == [
-        "contact", "summary", "experience", "format", "extras",
+        "contact", "summary", "skills", "experience", "projects",
+        "format", "extras",
     ]
-    # The fifth step adds 0 to the denominator, so this still holds.
     assert body["max_score"] == 100
     assert sum(s["max"] for s in body["steps"]) == 100
     assert body["resume_id"] == priya_resume
@@ -62,11 +64,54 @@ def test_filling_in_extras_does_not_change_the_score(client, priya):
     assert after["points_available"] == before["points_available"]
 
 
-def test_a_legacy_resume_with_no_extras_key_still_returns_five_steps(
+def test_a_legacy_resume_with_no_extras_key_still_returns_seven_steps(
     client, priya, priya_resume,
 ):
     body = _steps(client, priya, priya_resume)
-    assert len(body["steps"]) == 5
+    assert len(body["steps"]) == 7
+
+
+def test_projects_step_is_scored_at_fifteen(client, priya, priya_resume):
+    """2026-10-25 ruling, reversing "navigable but unscored": projects is a
+    15-point scored category (context & frequency)."""
+    step = next(s for s in _steps(client, priya, priya_resume)["steps"]
+                if s["id"] == "projects")
+    assert step["max"] == 15
+    assert step["advisory"] is False
+    assert "scored" not in step
+
+
+def test_filling_in_projects_moves_the_score(client, priya):
+    """Adding a real projects section to a resume with none earns points."""
+    rid = new_resume(client, priya, "Projects", WEAK)
+    before = _steps(client, priya, rid)
+    assert "projects.missing" in {
+        f["id"] for s in before["steps"] for f in s["findings"]
+    }
+    doc = client.get(f"/api/resumes/{rid}",
+                     headers={"X-User-Id": priya}).json()["structured_data"]
+    doc["projects"] = [
+        {"name": "Portfolio", "bullets": [
+            "Built a static-site generator serving 3,000 pages on a Pi",
+            "Shipped a docs theme downloaded by 400 users in a year",
+        ]},
+    ]
+    assert client.put(f"/api/resumes/{rid}/data", json={"structured_data": doc},
+                      headers={"X-User-Id": priya}).status_code == 200
+    after = _steps(client, priya, rid)
+    assert after["overall_score"] > before["overall_score"]
+    assert after["max_score"] == before["max_score"] == 100
+
+
+def test_contact_and_format_steps_are_advisory_gates(client, priya):
+    """The knockout filter and parser blocker: findings, zero points."""
+    rid = new_resume(client, priya, "Weak", WEAK)
+    body = _steps(client, priya, rid)
+    for step_id in ("contact", "format"):
+        step = next(s for s in body["steps"] if s["id"] == step_id)
+        assert step["advisory"] is True
+        assert (step["score"], step["max"], step["points_available"]) == (0, 0, 0)
+        assert all(f["points"] == 0 for f in step["findings"])
 
 
 def test_steps_work_before_any_analysis_has_been_run(client, priya):
@@ -96,24 +141,36 @@ def test_every_finding_carries_a_usable_payload(client, priya):
     body = _steps(client, priya, rid)
     findings = [f for s in body["steps"] for f in s["findings"]]
     assert findings, "a deliberately weak resume produced no findings"
+    # Advisory gates (contact/format) legitimately carry 0; a scored finding
+    # never does.
+    assert any(f["points"] > 0 for f in findings), "no SCORED finding at all"
+    scored = [f for f in findings if f["points"] > 0]
+    assert scored
     for f in findings:
-        assert f["points"] > 0
+        assert f["points"] > 0 or f["category"] in {"contact", "format"}
         assert f["target_ref"]
         assert f["message"] and f["fix_hint"]
         assert f["severity"] in {"high", "medium", "low"}
 
 
 def test_fixing_a_field_raises_the_score_by_the_promised_points(client, priya):
-    """End-to-end honesty check, through HTTP, the way the UI will see it."""
+    """End-to-end honesty check, through HTTP, the way the UI will see it.
+
+    Uses a SCORED card: contact/format cards now promise 0 points by design
+    (the advisory gates), so a delta check against them would prove nothing.
+    """
     rid = new_resume(client, priya, "Weak", WEAK)
     before = _steps(client, priya, rid)
     card = next(
         f for s in before["steps"] for f in s["findings"]
-        if f["id"] == "contact.email.invalid"
+        if f["id"] == "skills.missing"
     )
 
     data = dict(WEAK)
-    data["contact"] = {**WEAK["contact"], "email": "sam@example.com"}
+    data["skills"] = [
+        {"label": "Core", "items": ["Python", "Go", "SQL", "AWS"]},
+        {"label": "Platform", "items": ["Kubernetes", "Docker", "Linux", "Terraform"]},
+    ]
     r = client.put(f"/api/resumes/{rid}/data", json={"structured_data": data},
                    headers={"X-User-Id": priya})
     assert r.status_code == 200, r.text
@@ -121,7 +178,7 @@ def test_fixing_a_field_raises_the_score_by_the_promised_points(client, priya):
     after = _steps(client, priya, rid)
     assert after["overall_score"] - before["overall_score"] == card["points"]
     ids = {f["id"] for s in after["steps"] for f in s["findings"]}
-    assert "contact.email.invalid" not in ids
+    assert "skills.missing" not in ids
 
 
 def test_steps_reflect_edits_immediately_without_reanalysing(client, priya):

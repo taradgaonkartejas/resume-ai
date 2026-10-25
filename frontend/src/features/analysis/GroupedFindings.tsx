@@ -3,25 +3,30 @@ import { ChevronDown } from "lucide-react";
 import { RecommendationCard } from "./RecommendationCard";
 import { rankFindings, type Finding, type StructuredData } from "@/services";
 import {
-  groupFindingsByRole,
-  type RoleGroupData,
+  groupFindingsByEntry,
+  type EntryGroupData,
+  type SectionKind,
 } from "./groupFindings";
 import { cn } from "cn";
 
 export function GroupedFindings({
   findings,
   data,
+  section = "experience",
   resumeId,
   onFix,
   onFixed,
 }: {
   findings: Finding[];
   data: StructuredData | undefined;
+  /** "experience" groups per role, "projects" per project. Default keeps the
+   *  experience behaviour the component was written for. */
+  section?: SectionKind;
   resumeId: string | null;
   onFix: (f: Finding) => void;
   onFixed?: (f: Finding) => void;
 }) {
-  const { groups, ungrouped } = groupFindingsByRole(findings, data);
+  const { groups, ungrouped } = groupFindingsByEntry(findings, data, section);
 
   return (
     <div className="space-y-2">
@@ -40,10 +45,10 @@ export function GroupedFindings({
       )}
 
       {groups.map((group, i) => (
-        <RoleGroup
+        <EntryGroup
           key={group.key}
           group={group}
-          /* First role open, the rest collapsed: the top role is where most
+          /* First entry open, the rest collapsed: the top entry is where most
              findings and most recruiter attention land, and five expanded
              groups is the wall of cards this grouping exists to prevent. */
           defaultOpen={i === 0}
@@ -56,14 +61,14 @@ export function GroupedFindings({
   );
 }
 
-function RoleGroup({
+function EntryGroup({
   group,
   defaultOpen,
   resumeId,
   onFix,
   onFixed,
 }: {
-  group: RoleGroupData;
+  group: EntryGroupData;
   defaultOpen: boolean;
   resumeId: string | null;
   onFix: (f: Finding) => void;

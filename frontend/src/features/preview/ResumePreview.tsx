@@ -5,8 +5,10 @@ import {
   type StructuredData,
 } from "@/services";
 import { dateLabel } from "@/lib/dates";
-import { educationLines, experienceLines } from "@/lib/entries";
-import { hrefFor, labelLinks } from "@/lib/links";
+import { educationCells, experienceLines } from "@/lib/entries";
+import { hrefFor, linkLabel } from "@/lib/links";
+import { Icon } from "@/lib/icons";
+import { contactIcon, headingIcon, linkIcon } from "@/lib/icons-map";
 import { cn } from "cn";
 import { useMemo } from "react";
 import {
@@ -42,7 +44,10 @@ const FONT_STACK: Record<DesignTokens["font"], string> = {
 };
 
 /** Mirrors _DENSITY in export_service.py: section gap and line height. */
-const DENSITY: Record<DesignTokens["density"], { gap: string; leading: string }> = {
+const DENSITY: Record<
+  DesignTokens["density"],
+  { gap: string; leading: string }
+> = {
   dense: { gap: "mt-2", leading: "leading-snug" },
   normal: { gap: "mt-3", leading: "leading-normal" },
   airy: { gap: "mt-4", leading: "leading-relaxed" },
@@ -106,7 +111,13 @@ function ChangedBlock({
   );
 }
 
-function SectionHeading({ title, tokens }: { title: string; tokens: DesignTokens }) {
+function SectionHeading({
+  title,
+  tokens,
+}: {
+  title: string;
+  tokens: DesignTokens;
+}) {
   const label = tokens.caps ? title.toUpperCase() : title;
   const accent = tokens.accent || undefined;
 
@@ -115,6 +126,18 @@ function SectionHeading({ title, tokens }: { title: string; tokens: DesignTokens
     tokens.caps && "tracking-[0.12em]",
     !tokens.accent && "text-paper-ink",
   );
+
+  // Mirrors the PDF: vectors tinted with the accent, indenting the label --
+  // and skipped for sidebar/boxed, where the drawn bar owns the slot.
+  const icon = tokens.icons &&
+    ["rule", "underline", "plain"].includes(tokens.heading) && (
+      <Icon
+        name={headingIcon(title)}
+        size={9.5}
+        color={accent ?? "#3A3A3A"}
+        className="mr-[5px]"
+      />
+    );
 
   if (tokens.heading === "sidebar") {
     return (
@@ -146,9 +169,11 @@ function SectionHeading({ title, tokens }: { title: string; tokens: DesignTokens
           color: accent,
           // "rule" tints the line with the accent; "underline" stays neutral,
           // which is what separates Modern from Classic.
-          borderColor: tokens.heading === "rule" && accent ? accent : "var(--paper-line)",
+          borderColor:
+            tokens.heading === "rule" && accent ? accent : "var(--paper-line)",
         }}
       >
+        {icon}
         {label}
       </h2>
     );
@@ -156,6 +181,7 @@ function SectionHeading({ title, tokens }: { title: string; tokens: DesignTokens
 
   return (
     <h2 className={base} style={{ color: accent }}>
+      {icon}
       {label}
     </h2>
   );
@@ -168,7 +194,9 @@ function SectionHeading({ title, tokens }: { title: string; tokens: DesignTokens
  * TXT can never drift into four renderings of the same data.
  */
 function extraLine(entry: ExtraEntry): string {
-  const head = [entry.primary, entry.secondary].filter(Boolean).join(" \u2014 ");
+  const head = [entry.primary, entry.secondary]
+    .filter(Boolean)
+    .join(" \u2014 ");
   const date = (entry.date || "").trim();
   const detail = (entry.detail || "").trim();
   let out = head;
@@ -205,11 +233,13 @@ function Entry({
   primary,
   secondary,
   dates,
+  italicDates = false,
   marked = false,
 }: {
   primary: string;
   secondary?: string;
   dates?: string;
+  italicDates?: boolean;
   /** Mark the whole entry -- used where several addressable fields are
    *  merged into one display string. */
   marked?: boolean;
@@ -220,7 +250,16 @@ function Entry({
         <p className="text-[10.5px] font-semibold">
           <Marked on={marked}>{primary}</Marked>
         </p>
-        {dates && <p className="shrink-0 text-[9px] text-paper-muted">{dates}</p>}
+        {dates && (
+          <p
+            className={cn(
+              "shrink-0 text-[9px] text-paper-muted",
+              italicDates && "italic",
+            )}
+          >
+            {dates}
+          </p>
+        )}
       </div>
       {secondary && (
         <p className="text-[9.5px] italic text-paper-muted">
@@ -232,19 +271,26 @@ function Entry({
 }
 
 /**
- * Profile links as labels, not URLs, and actually clickable.
+ * Profile links as short URLs, and actually clickable.
  *
- * Both call sites previously rendered `links.join("  ·  ")` — raw URLs, inert
- * text. The resume this was built for writes "LinkedIn" over a hyperlink, and
- * the preview exists to show what the export will look like, so it has to
- * agree with the PDF and DOCX renderers.
+ * Both call sites once rendered `links.join("  ·  ")` — raw URLs, inert text.
+ * They then showed a bare label ("LinkedIn"), which reads well on screen and
+ * is useless on paper. Now: the shortened address, hyperlinked. The preview
+ * exists to show what the export will look like, so it agrees with the PDF.
  */
-function ProfileLinks({ links }: { links: string[] }) {
+function ProfileLinks({
+  links,
+  stacked = false,
+}: {
+  links: string[];
+  /** One per line, for the split header's right column. */
+  stacked?: boolean;
+}) {
   return (
     <>
-      {labelLinks(links.filter(Boolean)).map(({ url, label }, i) => (
-        <span key={url + i}>
-          {i > 0 && "  ·  "}
+      {links.filter(Boolean).map((url, i) => (
+        <span key={url + i} className={stacked ? "block" : undefined}>
+          {!stacked && i > 0 && "  ·  "}
           <a
             href={hrefFor(url)}
             target="_blank"
@@ -252,7 +298,7 @@ function ProfileLinks({ links }: { links: string[] }) {
             title={url}
             className="underline decoration-dotted underline-offset-2"
           >
-            {label}
+            {linkLabel(url)}
           </a>
         </span>
       ))}
@@ -278,7 +324,10 @@ export function ResumePreview({
   /** The "Show Changes" toggle. Off means no marks at all. */
   showChanges?: boolean;
 }) {
-  const tokens: DesignTokens = { ...DEFAULT_DESIGN_TOKENS, ...(tokensProp ?? {}) };
+  const tokens: DesignTokens = {
+    ...DEFAULT_DESIGN_TOKENS,
+    ...(tokensProp ?? {}),
+  };
   // Built once per render rather than per bullet: a 30-bullet resume would
   // otherwise rebuild the Set 30 times.
   const marked = useMemo(() => new Set(changedRefs ?? []), [changedRefs]);
@@ -303,17 +352,185 @@ export function ResumePreview({
     skills.length === 0 &&
     extras.length === 0;
 
-  const detailLines = [contact.email, contact.phone, contact.location].filter(Boolean);
+  const detailLines = [contact.email, contact.phone, contact.location].filter(
+    Boolean,
+  );
   const bullet = "text-[10px] " + leading;
-  // Clamp to the same 1..3 range the exporter enforces.
-  const columns = Math.max(1, Math.min(Number(tokens.skill_columns) || 1, 3));
+
+  // Sidebar templates put education and extras in a right rail. Skills
+  // stays directly under Summary in every template (incl. the sidebar:
+  // skills-below-summary ruling, 2026-10-25). Experience never moves: it
+  // is the longest section and the one a reader scans first, so it keeps
+  // the wide column. Mirrors MAIN/RAIL in export_service._render_pdf.
+  const layout = tokens.layout ?? "single";
+  const mainSections = (
+    <>
+      {summary.text && (
+        <Section title="Summary" tokens={tokens}>
+          <ChangedBlock on={mark(SUMMARY_REF)}>
+            <p className={bullet}>
+              <Marked on={mark(SUMMARY_REF)}>{summary.text}</Marked>
+            </p>
+          </ChangedBlock>
+        </Section>
+      )}
+      {skills.length > 0 && (
+        <Section title="Skills" tokens={tokens}>
+          {/* One wrapped line per group -- "Languages: Java, Python".
+              A bulleted multi-column grid was costing roughly half the
+              section's height and, in the PDF, was a text-extraction
+              hazard. Label and items share one paragraph so the line
+              wraps as a unit. */}
+          {skills.map((g, i) => (
+            <p key={i} className={cn(bullet, i > 0 && "mt-0.5")}>
+              {g.label && <span className="font-semibold">{g.label}: </span>}
+              {/* skills.N.items addresses the whole group, so the
+                  whole joined line is the changed range */}
+              <Marked on={mark(skillsRef(i))}>{g.items.join(", ")}</Marked>
+            </p>
+          ))}
+        </Section>
+      )}
+      {experience.length > 0 && (
+        <Section title="Experience" tokens={tokens}>
+          {experience.map((job, i) => (
+            <ChangedBlock
+              key={i}
+              on={job.bullets.some((_, j) => mark(experienceBulletRef(i, j)))}
+            >
+              <div className={i > 0 ? "mt-2" : undefined}>
+                {(() => {
+                  // Condensed roles collapse to one bold line -- this
+                  // template's own separator, exactly like the PDF.
+                  const [primary, secondary] = job.condensed
+                    ? experienceLines(job, true, "role", tokens.entry_sep)
+                    : experienceLines(
+                        job,
+                        tokens.entry === "inline",
+                        tokens.entry_lead,
+                        tokens.entry_sep,
+                      );
+                  return (
+                    <>
+                      <Entry
+                        dates={dateLabel(job)}
+                        italicDates={tokens.dates_style === "italic"}
+                        primary={primary}
+                        secondary={secondary || undefined}
+                      />
+                      {job.descriptor && (
+                        <p className="mt-0.5 text-[9px] italic text-paper-muted">
+                          {job.descriptor}
+                        </p>
+                      )}
+                      {!job.condensed && (
+                        <ul className="mt-0.5 list-disc space-y-0.5 pl-3.5">
+                          {job.bullets.map((b, j) => (
+                            <li key={j} className={bullet}>
+                              <Marked on={mark(experienceBulletRef(i, j))}>
+                                {b}
+                              </Marked>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+            </ChangedBlock>
+          ))}
+        </Section>
+      )}
+      {projects.length > 0 && (
+        <Section title="Projects" tokens={tokens}>
+          {projects.map((p, i) => (
+            <div key={i} className={i > 0 ? "mt-2" : undefined}>
+              {/* project entries carry `name`, not company/role */}
+              <Entry primary={p.name} />
+              <ul className="mt-0.5 list-disc space-y-0.5 pl-3.5">
+                {p.bullets.map((b, j) => (
+                  <li key={j} className={bullet}>
+                    <Marked on={mark(projectBulletRef(i, j))}>{b}</Marked>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </Section>
+      )}
+    </>
+  );
+  const railSections = (
+    <>
+      {/* Mirrors sec_contact() in export_service: a sidebar's contact
+          details and links lead the right rail, flush right, before
+          skills. Kept out of mainSections for exactly the reason the PDF
+          keeps them out of the header: one full-width contact line is
+          enough to hide the gutter from every column detector. */}
+      {layout === "sidebar" &&
+        (detailLines.length > 0 || contact.links.length > 0) && (
+          <div className="text-right text-[9px] leading-snug text-paper-muted">
+            {detailLines.map((line, i) => (
+              <p key={i}>{line}</p>
+            ))}
+            {contact.links.length > 0 && (
+              <p>
+                <ProfileLinks links={contact.links} stacked />
+              </p>
+            )}
+          </div>
+        )}
+      {education.length > 0 && (
+        <Section title="Education" tokens={tokens}>
+          {education.map((e, i) => (
+            <div key={i} className={i > 0 ? "mt-1.5" : undefined}>
+              {/* educationLines() merges several addressable fields
+                  into two display strings, so a per-field highlight
+                  would have to re-derive which substring came from
+                  which field. The entry is marked as a whole if ANY
+                  of its fields changed -- coarser, but it never
+                  points at the wrong text. */}
+              {(() => {
+                const [primary, secondary, dates] = educationCells(
+                  e,
+                  tokens.edu === "inline",
+                  tokens.edu_lead === "school",
+                );
+                return (
+                  <Entry
+                    dates={dates}
+                    primary={primary}
+                    italicDates={tokens.dates_style === "italic"}
+                    secondary={secondary || undefined}
+                    marked={EDUCATION_FIELDS.some((f) =>
+                      mark(educationRef(i, f)),
+                    )}
+                  />
+                );
+              })()}
+            </div>
+          ))}
+        </Section>
+      )}
+      {extras.map((section, i) => (
+        <Section key={i} title={section.title} tokens={tokens}>
+          {section.entries.map((entry, j) => (
+            <p key={j} className={bullet}>
+              {extraLine(entry)}
+            </p>
+          ))}
+        </Section>
+      ))}
+    </>
+  );
 
   return (
     <div className={cn("flex justify-center", className)}>
       <div
         // A4 is 1:1.414. Fixed width + min-height keeps the proportion honest
         // rather than letting content define the page shape.
-        className="w-[520px] min-h-[735px] rounded-sm bg-paper px-9 py-8 text-paper-ink shadow-2xl"
+        className="w-[520px] min-h-[735px] rounded-sm bg-paper px-9 py-7 text-paper-ink shadow-2xl"
         style={{
           fontFamily: FONT_STACK[tokens.font],
           transform: `scale(${zoom / 100})`,
@@ -323,7 +540,9 @@ export function ResumePreview({
         {isEmpty ? (
           <div className="grid h-[600px] place-items-center text-center">
             <div>
-              <p className="text-sm font-medium text-paper-ink">Nothing to preview yet</p>
+              <p className="text-sm font-medium text-paper-ink">
+                Nothing to preview yet
+              </p>
               <p className="mt-1 text-xs text-paper-muted">
                 Import a resume to see it rendered here.
               </p>
@@ -345,20 +564,28 @@ export function ResumePreview({
                     {contact.name || "Unnamed"}
                   </h1>
                   {contact.headline && (
-                    <p className="mt-0.5 text-[11px] text-paper-muted">{contact.headline}</p>
-                  )}
-                  {contact.links.length > 0 && (
-                    <p className="mt-0.5 text-[9px] text-paper-muted">
-                      <ProfileLinks links={contact.links} />
+                    <p className="mt-0.5 text-[11px] text-paper-muted">
+                      {contact.headline}
                     </p>
                   )}
                 </div>
+                {/* Contact AND links share the right column, matching the
+                    PDF: the exporter stacks the profile links under the
+                    detail rows in the same right-hand block. */}
                 <div className="shrink-0 text-right">
                   {detailLines.map((line, i) => (
-                    <p key={i} className="text-[9px] leading-snug text-paper-muted">
+                    <p
+                      key={i}
+                      className="text-[9px] leading-snug text-paper-muted"
+                    >
                       {line}
                     </p>
                   ))}
+                  {contact.links.length > 0 && (
+                    <p className="text-[9px] leading-snug text-paper-muted">
+                      <ProfileLinks links={contact.links} stacked />
+                    </p>
+                  )}
                 </div>
               </header>
             ) : (
@@ -373,141 +600,82 @@ export function ResumePreview({
                   {contact.name || "Unnamed"}
                 </h1>
                 {contact.headline && (
-                  <p className="mt-0.5 text-[11px] text-paper-muted">{contact.headline}</p>
-                )}
-                {detailLines.length > 0 && (
-                  <p className="mt-1 text-[9px] text-paper-muted">
-                    {detailLines.join("  ·  ")}
+                  <p className="mt-0.5 text-[11px] text-paper-muted">
+                    {contact.headline}
                   </p>
                 )}
-                {contact.links.length > 0 && (
-                  <p className="mt-0.5 text-[9px] text-paper-muted">
-                    <ProfileLinks links={contact.links} />
-                  </p>
-                )}
+                {/* In the PDF, contact and links share ONE row, laid out by
+                    hand because a link cell cannot sit inside a multi_cell.
+                    Here flexbox gives the same result for free. A sidebar's
+                    contact block lives in the rail instead, as it does in
+                    the PDF. */}
+                {layout !== "sidebar" &&
+                  (detailLines.length > 0 || contact.links.length > 0) &&
+                  (tokens.icons ? (
+                    /* The iconed twin of the row below: one icon+text pair
+                       per contact item and per link, " · " between pairs --
+                       same order and separators as _draw_icon_row. */
+                    <p className="mt-1 flex flex-wrap items-center gap-x-[3px] gap-y-[2px] text-[9px] leading-snug text-paper-muted">
+                      {[
+                        ...detailLines.map((line) => ({
+                          key: line,
+                          icon: contactIcon(line),
+                          body: line,
+                          href: null as string | null,
+                        })),
+                        ...contact.links.filter(Boolean).map((url) => ({
+                          key: url,
+                          icon: linkIcon(url),
+                          body: linkLabel(url),
+                          href: hrefFor(url),
+                        })),
+                      ].map((item, i) => (
+                        <span key={item.key + i} className="inline-flex items-center gap-[3px]">
+                          {i > 0 && <span className="mx-[2px]">·</span>}
+                          <Icon name={item.icon} size={8.5} color={tokens.accent || "#3A3A3A"} />
+                          {item.href ? (
+                            <a
+                              href={item.href}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              title={item.key}
+                              className="underline decoration-dotted underline-offset-2"
+                            >
+                              {item.body}
+                            </a>
+                          ) : (
+                            item.body
+                          )}
+                        </span>
+                      ))}
+                    </p>
+                  ) : (
+                    <p className="mt-1 text-[9px] leading-snug text-paper-muted">
+                      {detailLines.join("  ·  ")}
+                      {detailLines.length > 0 && contact.links.length > 0 &&
+                        "  ·  "}
+                      <ProfileLinks links={contact.links} />
+                    </p>
+                  ))}
               </header>
             )}
 
             {tokens.divider && <hr className="mt-2 border-paper-line" />}
 
-            {summary.text && (
-              <Section title="Summary" tokens={tokens}>
-                <ChangedBlock on={mark(SUMMARY_REF)}>
-                  <p className={bullet}>
-                    <Marked on={mark(SUMMARY_REF)}>{summary.text}</Marked>
-                  </p>
-                </ChangedBlock>
-              </Section>
+            {layout === "sidebar" ? (
+              /* Two columns. The gutter is not decoration -- the PDF's
+                 is what lets a text extractor find the split, and the
+                 preview has to show the same proportions. */
+              <div className="flex gap-5">
+                <div className="min-w-0 flex-1">{mainSections}</div>
+                <aside className="w-[30%] shrink-0">{railSections}</aside>
+              </div>
+            ) : (
+              <>
+                {mainSections}
+                {railSections}
+              </>
             )}
-
-            {experience.length > 0 && (
-              <Section title="Experience" tokens={tokens}>
-                {experience.map((job, i) => (
-                  <ChangedBlock
-                    key={i}
-                    on={job.bullets.some((_, j) => mark(experienceBulletRef(i, j)))}
-                  >
-                  <div className={i > 0 ? "mt-2" : undefined}>
-                    <Entry
-                      dates={dateLabel(job)}
-                      primary={experienceLines(job, tokens.entry === "inline")[0]}
-                      secondary={
-                        experienceLines(job, tokens.entry === "inline")[1] || undefined
-                      }
-                    />
-                    <ul className="mt-0.5 list-disc space-y-0.5 pl-3.5">
-                      {job.bullets.map((b, j) => (
-                        <li key={j} className={bullet}>
-                          <Marked on={mark(experienceBulletRef(i, j))}>{b}</Marked>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                  </ChangedBlock>
-                ))}
-              </Section>
-            )}
-
-            {projects.length > 0 && (
-              <Section title="Projects" tokens={tokens}>
-                {projects.map((p, i) => (
-                  <div key={i} className={i > 0 ? "mt-2" : undefined}>
-                    {/* project entries carry `name`, not company/role */}
-                    <Entry primary={p.name} />
-                    <ul className="mt-0.5 list-disc space-y-0.5 pl-3.5">
-                      {p.bullets.map((b, j) => (
-                        <li key={j} className={bullet}>
-                          <Marked on={mark(projectBulletRef(i, j))}>{b}</Marked>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ))}
-              </Section>
-            )}
-
-            {education.length > 0 && (
-              <Section title="Education" tokens={tokens}>
-                {education.map((e, i) => (
-                  <div key={i} className={i > 0 ? "mt-1.5" : undefined}>
-                    {/* educationLines() merges several addressable fields
-                        into two display strings, so a per-field highlight
-                        would have to re-derive which substring came from
-                        which field. The entry is marked as a whole if ANY
-                        of its fields changed -- coarser, but it never
-                        points at the wrong text. */}
-                    <Entry
-                      dates={dateLabel(e)}
-                      primary={educationLines(e)[0]}
-                      secondary={educationLines(e)[1] || undefined}
-                      marked={EDUCATION_FIELDS.some((f) => mark(educationRef(i, f)))}
-                    />
-                  </div>
-                ))}
-              </Section>
-            )}
-
-            {skills.length > 0 && (
-              <Section title="Skills" tokens={tokens}>
-                {skills.map((g, i) => (
-                  <div key={i} className={i > 0 ? "mt-1" : undefined}>
-                    {g.label && (
-                      <p className="text-[9.5px] font-semibold">{g.label}</p>
-                    )}
-                    {columns === 1 ? (
-                      <p className={bullet}>
-                        {/* skills.N.items addresses the whole group, so the
-                            whole joined line is the changed range */}
-                        <Marked on={mark(skillsRef(i))}>{g.items.join(", ")}</Marked>
-                      </p>
-                    ) : (
-                      <ul
-                        className="list-disc pl-3.5"
-                        // Column-fill matches the exporter, which fills down
-                        // each column rather than across rows.
-                        style={{ columnCount: columns, columnGap: "1rem" }}
-                      >
-                        {g.items.map((item, j) => (
-                          <li key={j} className={bullet}>
-                            <Marked on={mark(skillsRef(i))}>{item}</Marked>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                ))}
-              </Section>
-            )}
-
-            {extras.map((section, i) => (
-              <Section key={i} title={section.title} tokens={tokens}>
-                {section.entries.map((entry, j) => (
-                  <p key={j} className={bullet}>
-                    {extraLine(entry)}
-                  </p>
-                ))}
-              </Section>
-            ))}
           </>
         )}
       </div>

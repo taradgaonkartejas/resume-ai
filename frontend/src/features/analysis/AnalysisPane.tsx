@@ -12,8 +12,10 @@ import { cn } from "cn";
 
 const CATEGORY_LABELS: Record<CategoryKey, string> = {
   contact: "Contact details",
-  summary: "Professional summary",
+  summary: "Summary & education",
+  skills: "Skills & keywords",
   experience: "Work experience",
+  projects: "Projects",
   format: "Formatting & ATS",
 };
 
@@ -21,9 +23,12 @@ const CATEGORY_LABELS: Record<CategoryKey, string> = {
  * Resume Analysis tab.
  *
  * The score is deterministic — heuristics.py sets the number with fixed
- * weights (contact 15, summary 20, experience 45, format 20) and the LLM only
- * writes the explanation. So re-running on unchanged content is a no-op, and
- * the button says "Re-run" rather than pretending to be a fresh opinion.
+ * weights (summary+education 10, skills 30, experience 45, projects 15) and
+ * the LLM only writes the explanation. Contact and format are advisory
+ * passes (knockout filter / parser blocker): they emit findings but no
+ * points, so their bars show issue counts, not a filled score. Re-running on
+ * unchanged content is a no-op, and the button says "Re-run" rather than
+ * pretending to be a fresh opinion.
  */
 export function AnalysisPane({ resumeId }: { resumeId: string | null }) {
   const { data: analysis, isLoading, error } = useAnalysis(resumeId);
@@ -52,8 +57,8 @@ export function AnalysisPane({ resumeId }: { resumeId: string | null }) {
       <div className="rounded-xl border border-dashed border-line px-4 py-8 text-center">
         <p className="text-sm font-medium">No analysis yet</p>
         <p className="mx-auto mt-1 max-w-xs text-xs text-content-muted">
-          Score your resume against ATS rules across contact details, summary,
-          experience and formatting.
+          Score your resume against ATS rules across summary, skills,
+          experience and projects — plus the contact and formatting gates.
         </p>
         <Button
           className="mt-4"
@@ -167,6 +172,10 @@ export function AnalysisPane({ resumeId }: { resumeId: string | null }) {
           if (!cat) return null;
           const expanded = open === key;
           const pct = cat.max > 0 ? Math.round((cat.score / cat.max) * 100) : 0;
+          // Advisory passes (contact / format) are 0-point gates: the bar is
+          // a pass/fail verdict, not a gradient, so a full-width bar reads
+          // "all clear" and a warning bar reads "gate failed".
+          const advisory = cat.max === 0;
           return (
             <div key={key} className="overflow-hidden rounded-lg border border-line-soft">
               <button
@@ -180,18 +189,26 @@ export function AnalysisPane({ resumeId }: { resumeId: string | null }) {
                     <div
                       className={cn(
                         "h-full rounded-full transition-[width] duration-500",
-                        pct >= 80
-                          ? "bg-accept-text"
-                          : pct >= 50
-                            ? "bg-brand"
-                            : "bg-warning",
+                        advisory
+                          ? cat.notes.length > 0
+                            ? "bg-warning"
+                            : "bg-accept-text"
+                          : pct >= 80
+                            ? "bg-accept-text"
+                            : pct >= 50
+                              ? "bg-brand"
+                              : "bg-warning",
                       )}
-                      style={{ width: `${pct}%` }}
+                      style={{ width: advisory ? "100%" : `${pct}%` }}
                     />
                   </div>
                 </div>
                 <span className="shrink-0 text-xs tabular-nums text-content-muted">
-                  {cat.score}/{cat.max}
+                  {advisory
+                    ? cat.notes.length === 0
+                      ? "pass"
+                      : `${cat.notes.length} failed`
+                    : `${cat.score}/${cat.max}`}
                 </span>
                 {cat.notes.length > 0 && (
                   <span className="shrink-0 rounded-full bg-surface-3 px-1.5 text-[10px] text-content-muted">

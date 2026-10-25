@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ExportButton } from "@/features/export/ExportButton";
 import { UserSwitcher } from "@/app/UserSwitcher";
 import { ThemeToggle } from "@/app/ThemeToggle";
 import { TemplateModal } from "@/features/templates/TemplateModal";
@@ -167,6 +168,9 @@ export function Workspace() {
             <LayoutTemplate className="size-4" aria-hidden />
             Templates
           </Button>
+          {hasResume && resume && (
+            <ExportButton resumeId={resume.id} title={resume.title} />
+          )}
           <Button onClick={() => dispatch({ type: "openModal", modal: "import" })}>
             <FileUp className="size-4" aria-hidden />
             Import resume

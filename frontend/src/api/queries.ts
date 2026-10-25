@@ -344,6 +344,11 @@ export function useSuggestionAction(resumeId: string | null, sessionId: string |
         qc.invalidateQueries({ queryKey: keys.analysis(resumeId) });
         qc.invalidateQueries({ queryKey: keys.versions(resumeId) });
         qc.invalidateQueries({ queryKey: keys.tailor(resumeId) });
+        // The server mirrors this edit into the transcript, so the chat is
+        // stale too. Without this the panes disagree: the preview and the
+        // score update while the conversation still ends at the last thing
+        // the user typed.
+        qc.invalidateQueries({ queryKey: keys.chat(resumeId) });
       }
       qc.invalidateQueries({ queryKey: keys.resumes });
     },
@@ -380,6 +385,11 @@ export function useAcceptAll(resumeId: string | null, sessionId: string | null) 
         qc.invalidateQueries({ queryKey: keys.analysis(resumeId) });
         qc.invalidateQueries({ queryKey: keys.versions(resumeId) });
         qc.invalidateQueries({ queryKey: keys.tailor(resumeId) });
+        // The server mirrors this edit into the transcript, so the chat is
+        // stale too. Without this the panes disagree: the preview and the
+        // score update while the conversation still ends at the last thing
+        // the user typed.
+        qc.invalidateQueries({ queryKey: keys.chat(resumeId) });
       }
       qc.invalidateQueries({ queryKey: keys.resumes });
     },
@@ -407,6 +417,11 @@ export function useRestoreVersion(resumeId: string | null) {
         qc.invalidateQueries({ queryKey: keys.analysis(resumeId) });
         qc.invalidateQueries({ queryKey: keys.versions(resumeId) });
         qc.invalidateQueries({ queryKey: keys.tailor(resumeId) });
+        // The server mirrors this edit into the transcript, so the chat is
+        // stale too. Without this the panes disagree: the preview and the
+        // score update while the conversation still ends at the last thing
+        // the user typed.
+        qc.invalidateQueries({ queryKey: keys.chat(resumeId) });
       }
       qc.invalidateQueries({ queryKey: keys.resumes });
     },
@@ -442,6 +457,11 @@ function useVersionStep(
         qc.invalidateQueries({ queryKey: keys.analysis(resumeId) });
         qc.invalidateQueries({ queryKey: keys.versions(resumeId) });
         qc.invalidateQueries({ queryKey: keys.tailor(resumeId) });
+        // The server mirrors this edit into the transcript, so the chat is
+        // stale too. Without this the panes disagree: the preview and the
+        // score update while the conversation still ends at the last thing
+        // the user typed.
+        qc.invalidateQueries({ queryKey: keys.chat(resumeId) });
       }
       qc.invalidateQueries({ queryKey: keys.resumes });
     },
@@ -464,6 +484,21 @@ export function useRedo(resumeId: string | null) {
  * both change the same lists the accept path changes. Two hooks with
  * drifting invalidation sets is how a card ends up stale in one tab only.
  */
+/**
+ * One suggestion by id.
+ *
+ * Only the chat needs this: a message stores a `suggestion_id`, not the card,
+ * so after a reload it cannot tell a draft from a question card. Status is
+ * live state and must not be snapshotted into the transcript.
+ */
+export function useSuggestion(suggestionId: string | null) {
+  return useQuery({
+    queryKey: ["suggestion", suggestionId],
+    queryFn: () => suggestionService.get(suggestionId as string),
+    enabled: !!suggestionId,
+  });
+}
+
 export function useAnswerQuestion(resumeId: string | null, sessionId: string | null) {
   const qc = useQueryClient();
   return useMutation({
@@ -483,6 +518,11 @@ export function useAnswerQuestion(resumeId: string | null, sessionId: string | n
         qc.invalidateQueries({ queryKey: keys.analysis(resumeId) });
         qc.invalidateQueries({ queryKey: keys.versions(resumeId) });
         qc.invalidateQueries({ queryKey: keys.tailor(resumeId) });
+        // The server mirrors this edit into the transcript, so the chat is
+        // stale too. Without this the panes disagree: the preview and the
+        // score update while the conversation still ends at the last thing
+        // the user typed.
+        qc.invalidateQueries({ queryKey: keys.chat(resumeId) });
       }
       qc.invalidateQueries({ queryKey: keys.resumes });
     },

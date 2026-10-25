@@ -186,6 +186,10 @@ class StepOut(BaseModel):
     points_available: int
     finding_count: int
     status: str
+    #: Advisory (0-point) gate steps — the contact knockout filter and the
+    #: pass/fail format parser blocker, 2026-10-25 ruling. Findings yes,
+    #: points no.
+    advisory: bool = False
     findings: list[FindingOut] = Field(default_factory=list)
 
 
@@ -324,9 +328,12 @@ class ChatMessageOut(BaseModel):
     model_config = ORM
     id: uuid.UUID
     resume_id: uuid.UUID
+    #: "user" | "assistant" | "event" -- see models.ChatMessage.role.
     role: str
     content: str
     suggestion_id: uuid.UUID | None = None
+    #: Structured payload for `event` rows; empty for conversation turns.
+    meta: dict = Field(default_factory=dict)
     created_at: datetime
 
 

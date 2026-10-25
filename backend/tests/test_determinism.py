@@ -82,7 +82,11 @@ def test_match_percent_is_deterministic():
     keywords = ["kubernetes", "terraform", "rust", "haskell"]
     runs = [match_keywords(RESUME, keywords) for _ in range(5)]
     assert all(r == runs[0] for r in runs)
-    assert runs[0]["match_percent"] == 50.0
+    # Section-weighted ATS score (2026-10-25 ruling): "kubernetes" earns the
+    # experience bucket (45), "terraform" the skills bucket (30); the two
+    # missing earn 0. 75 weighted points over 4 keywords * 100 total weight
+    # = 18.75 -> 18.8. The old count-based 50.0 is retired.
+    assert runs[0]["match_percent"] == 18.8
 
 
 def test_analysis_endpoint_is_deterministic(client, priya, priya_resume):

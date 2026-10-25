@@ -78,3 +78,9 @@ dependencies:
       # then it is a collection error, not a test failure.
       - reportlab==5.0.1
       - ruff==0.16.8
+      # Build-time, not runtime: re-subsets the vendored DejaVu faces if the
+      # glyph repertoire in app/services/export_service.py grows. Ships
+      # nowhere -- but undeclared it is the exact prune trap above: the first
+      # fresh environment would fail `python scripts/subset_fonts.py` with an
+      # ImportError and no hint that the fonts it ships are pre-made.
+      - fonttools==4.67.0

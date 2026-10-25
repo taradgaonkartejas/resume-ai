@@ -94,17 +94,44 @@ def _clean() -> dict:
                 ],
             },
         ],
-        "projects": [],
+        # 2026-10-25: projects is a SCORED 15-point category now (bullets,
+        # metrics and verbs, share-graded like experience), so a "clean"
+        # resume must have a non-empty, well-formed one.
+        "projects": [
+            {
+                "name": "Pager tooling",
+                "bullets": [
+                    "Built a Go CLI that cut alert triage to 4 minutes for "
+                    "2,400 developers",
+                    "Shipped a Slack integration adopted by 300 teams in the "
+                    "first quarter",
+                ],
+            },
+            {
+                "name": "Metrics sandbox",
+                "bullets": [
+                    "Automated Prometheus scenario replay, cutting repro "
+                    "time by 80%",
+                ],
+            },
+        ],
         "education": [{
             "school": "College of Engineering Pune", "degree": "BE",
             "field_of_study": "Computer Engineering",
             "start_date": "2014", "end_date": "2018",
         }],
-        "skills": [{
-            "label": "Infrastructure",
-            "items": ["Kubernetes", "Terraform", "Prometheus", "AWS",
-                      "Postgres", "Python"],
-        }],
+        # 2026-10-25: a scored 30-point category -- 8+ items for full breadth,
+        # every group labelled, no repeats.
+        "skills": [
+            {
+                "label": "Infrastructure",
+                "items": ["Kubernetes", "Terraform", "Prometheus", "AWS"],
+            },
+            {
+                "label": "Languages & Data",
+                "items": ["Python", "Go", "SQL", "Postgres"],
+            },
+        ],
     })
 
 
@@ -210,6 +237,42 @@ TIER_1_DEFECTS = [
             0, "Manage 30 services on EKS with zero customer downtime"
         ),
     ),
+    (
+        "summary.ai_language",
+        # Short sentence appended: ai_language fires, complex_sentence must
+        # not (4 words, one clause).
+        lambda r: r["summary"].__setitem__(
+            "text", r["summary"]["text"] + " Passionate about robust systems."
+        ),
+    ),
+    (
+        "summary.complex_sentence",
+        # Clause-packed but metric-free, filler-free, verb-led: only the
+        # complexity rule may trip.
+        lambda r: r["summary"].__setitem__(
+            "text",
+            r["summary"]["text"]
+            + " Coordinated releases across four teams, standardised tooling "
+            "for the group, mentored six engineers, and kept on-call humane.",
+        ),
+    ),
+    (
+        "experience.ai_language",
+        lambda r: r["experience"][0]["bullets"].__setitem__(
+            # Keeps the credited opener and the metric so ONLY the lexicon
+            # rule fires.
+            0, "Led migration of 40 services, seamlessly cutting deploy time by 65%"
+        ),
+    ),
+    (
+        "experience.complex_sentence",
+        lambda r: r["experience"][0]["bullets"].__setitem__(
+            0,
+            "Led a migration spanning 40 Kubernetes services across two "
+            "regions, coordinated storage, networking, and compute cutovers, "
+            "and cut deploy time by 65%",
+        ),
+    ),
 ]
 
 
@@ -260,11 +323,15 @@ def test_a_tier_1_defect_introduces_only_its_own_finding(finding_id, mutate):
 #: finding id -> the SUB_BUDGETS key that funds it.
 BUDGET_KEY = {
     "summary.filler_language": ("summary", "filler"),
+    "summary.complex_sentence": ("summary", "complex_sentence"),
+    "summary.ai_language": ("summary", "ai_language"),
     "experience.filler_language": ("experience", "filler"),
     "experience.impossible_metric": ("experience", "impossible_metric"),
     "experience.first_person": ("experience", "first_person"),
     "experience.repeated_opener": ("experience", "repeated_opener"),
     "experience.tense_mismatch": ("experience", "tense_mismatch"),
+    "experience.complex_sentence": ("experience", "complex_sentence"),
+    "experience.ai_language": ("experience", "ai_language"),
 }
 
 
@@ -290,11 +357,15 @@ def test_tier_1_findings_route_to_an_action_the_system_can_honour():
     """
     expected = {
         "summary.filler_language": "rewrite",
+        "summary.complex_sentence": "rewrite",
+        "summary.ai_language": "rewrite",
         "experience.filler_language": "rewrite",
         "experience.impossible_metric": "quantify",
         "experience.first_person": "rewrite",
         "experience.repeated_opener": "rewrite",
         "experience.tense_mismatch": "rewrite",
+        "experience.complex_sentence": "rewrite",
+        "experience.ai_language": "rewrite",
     }
     for finding_id, mutate in TIER_1_DEFECTS:
         data = _clean()

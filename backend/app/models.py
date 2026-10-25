@@ -268,9 +268,22 @@ class ChatMessage(Base):
     resume_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("resumes.id", ondelete="CASCADE"), index=True
     )
+    #: "user" | "assistant" | "event".
+    #:
+    #: `event` records something that happened in ANOTHER pane -- a Fix with
+    #: AI draft, an accepted suggestion, a score move -- so the transcript is
+    #: a log as well as an input. It is deliberately not "assistant":
+    #: ChatPane's standing rule is that chat never edits the resume and the
+    #: assistant must never claim it applied a change. An event says "this
+    #: happened", not "I did this".
     role: Mapped[str] = mapped_column(String(20))
     content: Mapped[str] = mapped_column(Text)
     suggestion_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    #: Structured payload for `event` rows: {"kind", "target_ref", "score_before",
+    #: "score_after", ...}. Kept OUT of `content` because the LLM history
+    #: builder replays `content` into the prompt, and JSON there would be fed
+    #: to the model as if it were conversation.
+    meta: Mapped[dict] = mapped_column(JSONType, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     resume: Mapped["Resume"] = relationship(back_populates="messages")

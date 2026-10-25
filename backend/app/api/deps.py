@@ -144,8 +144,11 @@ def suggestion_service(
     resumes: Annotated[ResumeRepository, Depends(resume_repo)],
     sessions: Annotated[TailoringRepository, Depends(tailoring_repo)],
     versions: Annotated[VersionService, Depends(version_service)],
+    # Mirrors edits into the chat transcript. Injected rather than imported
+    # so a test can construct the service without one.
+    chats: Annotated[ChatRepository, Depends(chat_repo)],
 ) -> SuggestionService:
-    return SuggestionService(suggestions, resumes, sessions, versions)
+    return SuggestionService(suggestions, resumes, sessions, versions, chats)
 
 
 def chat_service(
@@ -155,8 +158,10 @@ def chat_service(
     users: Annotated[UserRepository, Depends(user_repo)],
     vectors: Annotated[VectorRepository, Depends(vector_repo)],
     runs: Annotated[AgentRunRepository, Depends(agent_run_repo)],
+    # Gap keywords for the skills advice.
+    sessions: Annotated[TailoringRepository, Depends(tailoring_repo)],
 ) -> ChatService:
-    return ChatService(chats, resumes, suggestions, users, vectors, runs)
+    return ChatService(chats, resumes, suggestions, users, vectors, runs, sessions)
 
 
 def export_service(

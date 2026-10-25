@@ -615,12 +615,20 @@ def iter_bullets(data: dict):
                 yield f"{prefix}_{i}.bullet_{j}", placement, bullet
 
 
-#: host -> display label for a profile link.
+#: Hosts recognised as profile links, and their display labels.
 #:
-#: A resume that writes "LinkedIn" over a hyperlink is doing the right thing,
-#: and the exports should reproduce that rather than dumping a 54-character
-#: URL into the contact header. Mirrored in `frontend/src/lib/links.ts`; the
-#: two are pinned together by test_profile_links.py.
+#: Parsing half -- used when harvesting a PDF's annotation layer: a hyperlink
+#: to one of these is a profile and belongs in `contact.links`, while a link
+#: to a company or a project does not.
+#:
+#: Display half -- what the PDF/preview/DOCX print for the link. Labels were
+#: dropped once ("the address, not a word: a label is useless on paper").
+#: RESTORED 2026-10-24: the user asked for exactly what every one of our
+#: reference resumes does -- a brand word carrying the hyperlink. The round
+#: trip stays safe because the parser reads the annotation layer, and the
+#: "useless on paper" objection no longer holds: email and phone print in
+#: clear text right beside the label, and the PDF/DOCX shipped to a recruiter
+#: is opened on a screen. TXT (no annotation layer) keeps the address.
 PROFILE_HOSTS: dict[str, str] = {
     "linkedin.com": "LinkedIn",
     "github.com": "GitHub",
@@ -664,32 +672,6 @@ def _known_host(url: str) -> str | None:
     return None
 
 
-def profile_label(url: str) -> str:
-    """"https://www.linkedin.com/in/tejas-taradgaonkar" -> "LinkedIn"."""
-    key = _known_host(url)
-    if key:
-        return PROFILE_HOSTS[key]
-    return _host_of(url) or url
-
-
-def label_links(urls: list[str]) -> list[tuple[str, str]]:
-    """Pair each URL with its display label, disambiguating collisions.
-
-    Two GitHub links both labelled "GitHub" would be indistinguishable, so a
-    repeated label takes the last meaningful path segment:
-    "GitHub (taradgaonkartejas)".
-    """
-    labels = [profile_label(u) for u in urls]
-    out: list[tuple[str, str]] = []
-    for url, label in zip(urls, labels, strict=True):
-        if labels.count(label) > 1:
-            tail = [p for p in url.split("://")[-1].split("/")[1:] if p]
-            if tail:
-                label = f"{label} ({tail[-1]})"
-        out.append((url, label))
-    return out
-
-
 def with_location(name: str, location: str | None) -> str:
     """"Acme Corp" + "Pune" -> "Acme Corp, Pune".
 
@@ -709,13 +691,17 @@ def with_location(name: str, location: str | None) -> str:
     return f"{name}, {place}"
 
 
-def education_lines(entry: dict) -> tuple[str, str]:
+def education_lines(entry: dict, school_first: bool = False) -> tuple[str, str]:
     """(primary, detail) for one education entry, shared by all four surfaces.
 
     `field_of_study`, `location` and `grade` are in the canonical shape and
     editable in the step editor, but rendered in **no** export -- the editor
     promised fields the output silently dropped. One formatter rather than
     four keeps the preview honest about what the PDF will contain.
+
+    `school_first` is fix-list defect 9 made per-template: the executive
+    reference headlines the INSTITUTION, with the degree beneath it. Default
+    stays degree-first, matching every other template.
     """
     degree = (entry.get("degree") or "").strip()
     field = (entry.get("field_of_study") or "").strip()
@@ -727,8 +713,18 @@ def education_lines(entry: dict) -> tuple[str, str]:
         primary = f"{degree}, {field}".strip(" ,") if degree else field
     if not primary:
         # No degree at all: the school becomes the headline so the entry is
-        # never a blank line with a date beside it.
+        # never a blank line with a date beside it. The same in both orders --
+        # there is nothing to swap when only one line exists.
         primary, school = school, ""
+
+    if school_first and school:
+        # Bold dates row carries "School, City"; the degree line drops
+        # beneath and takes the grade with it.
+        headline = with_location(school, entry.get("location"))
+        detail = primary
+        if grade:
+            detail = f"{detail} · {grade}" if detail else grade
+        return headline, detail
 
     detail = with_location(school, entry.get("location"))
     if grade:
@@ -736,15 +732,88 @@ def education_lines(entry: dict) -> tuple[str, str]:
     return primary, detail
 
 
-def experience_lines(entry: dict, inline: bool = False) -> tuple[str, str]:
-    """(primary, detail) for one experience entry. `location` was also dropped."""
+def education_cells(
+    entry: dict, inline: bool = False, school_first: bool = False
+) -> tuple[str, str, str]:
+    """(primary, detail, dates_right) for one education entry.
+
+    `school_first` applies to the stacked shape only; the inline row already
+    folds the school into the primary, and reversing an inline fold would
+    put the date beside the school name and away from the degree -- which
+    defeats the scanability the row exists for.
+
+    `education_lines` is the experience shape -- primary, detail -- and every
+    surface renders the date range beside the primary on its own. The
+    `inline` style from the reference template moves the school up into the
+    primary row ("PG-DAC \u2014 CDAC, Pune") and parks the location next to
+    the dates on the RIGHT ("2024 | Pune"), leaving the grade as the detail
+    row. One helper, one place, so the four surfaces cannot fold the same
+    fields four slightly different ways.
+    """
+    primary, detail = education_lines(entry, school_first=school_first and not inline)
+    dates = date_label(entry)
+    if not inline:
+        return primary, detail, dates
+
+    location = (entry.get("location") or "").strip()
+    grade = (entry.get("grade") or "").strip()
+    school = with_location(entry.get("school", ""), location)
+    # education_lines promotes the school to primary when no degree exists;
+    # gluing it on again would print it twice. Compare the RAW name --
+    # with_location has already folded the city into `school` by then.
+    raw_school = (entry.get("school") or "").strip()
+    if school and raw_school not in primary:
+        primary = f"{primary} \u2014 {school}" if primary else school
+    right = f"{dates} | {location}" if (dates and location) else dates
+    return primary, grade if grade else "", right
+
+
+def experience_lines(
+    entry: dict, inline: bool = False, lead: str = "role", sep: str = " - "
+) -> tuple[str, str]:
+    """(primary, detail) for one experience entry. `location` was also dropped.
+
+    `lead` picks which line carries the dates. "role" puts the job title on
+    the dates row with the employer beneath; "company" does the reverse,
+    which is what most printed templates do -- it groups a career by employer
+    and reads better when someone held several titles at one company.
+    """
     role = (entry.get("role") or "").strip()
     company = with_location(entry.get("company", ""), entry.get("location"))
     if inline:
-        return " - ".join(x for x in (role, company) if x), ""
+        return sep.join(x for x in (role, company) if x), ""
+    if lead == "company" and company:
+        return company, role
     if role:
         return role, company
     return company, ""
+
+
+def link_label(url: str) -> str:
+    """The word printed for a link -- "LinkedIn", not the 42-character path.
+
+    Recognised profile hosts get their brand name (which is what every
+    reference resume does); anything else falls back to the short address,
+    because an unrecognised URL is the only information the reader has.
+    """
+    host = short_url(url).split("/", 1)[0].lower()
+    return PROFILE_HOSTS.get(host, short_url(url))
+
+
+def short_url(url: str) -> str:
+    """https://www.linkedin.com/in/username/ -> linkedin.com/in/username
+
+    Used by the TXT export and as the fallback label for hosts without a
+    recognised brand: a TXT has no annotation layer, so printing only a label
+    there would lose the address outright.
+    """
+    text = (url or "").strip()
+    for prefix in ("https://", "http://"):
+        if text.lower().startswith(prefix):
+            text = text[len(prefix) :]
+    if text.lower().startswith("www."):
+        text = text[4:]
+    return text.rstrip("/")
 
 
 def to_plain_text(data: dict) -> str:
@@ -759,19 +828,28 @@ def to_plain_text(data: dict) -> str:
     if detail:
         lines.append(detail)
 
-    # Plain text cannot carry a hyperlink, so a label is all that survives.
-    # Chosen deliberately over "LinkedIn: https://..." for consistency with
-    # the other three surfaces. Worth knowing the cost: this file is the ATS
-    # paste target, and a reader of the TXT alone cannot reach the profile.
-    link_labels = [label for _url, label in label_links(
-        [x for x in contact.get("links", []) if x]
-    )]
-    if link_labels:
-        lines.append(" · ".join(link_labels))
+    # Plain text cannot carry a hyperlink, so the address is the only thing
+    # that can survive. This used to print bare labels ("LinkedIn") for
+    # consistency with the other surfaces -- but this file is the ATS paste
+    # target, and a reader of the TXT alone could not reach the profile at
+    # all. The other surfaces now print addresses too, so consistency and
+    # usefulness finally point the same way.
+    link_urls = [short_url(x) for x in contact.get("links", []) if x]
+    if link_urls:
+        lines.append(" · ".join(link_urls))
 
     summary = data.get("summary", {}).get("text", "")
     if summary:
         lines += ["", "SUMMARY", summary]
+
+    # Skills directly below Summary (skills-below-summary ruling,
+    # 2026-10-25) -- same order as the PDF and DOCX exports.
+    if data.get("skills"):
+        lines += ["", "SKILLS"]
+        for group in data["skills"]:
+            label = group.get("label", "")
+            items = ", ".join(group.get("items", []))
+            lines.append(f"{label}: {items}" if label else items)
 
     if data.get("experience"):
         lines += ["", "EXPERIENCE"]
@@ -786,7 +864,11 @@ def to_plain_text(data: dict) -> str:
             )
             dates = date_label(entry)
             lines.append(f"{head} {dates}".strip())
-            lines += [f"  - {b}" for b in entry.get("bullets", [])]
+            descriptor = (entry.get("descriptor") or "").strip()
+            if descriptor:
+                lines.append(f"  {descriptor}")
+            if not entry.get("condensed"):
+                lines += [f"  - {b}" for b in entry.get("bullets", [])]
 
     if data.get("projects"):
         lines += ["", "PROJECTS"]
@@ -801,13 +883,6 @@ def to_plain_text(data: dict) -> str:
             lines.append(
                 " — ".join(x for x in (detail, primary, date_label(entry)) if x)
             )
-
-    if data.get("skills"):
-        lines += ["", "SKILLS"]
-        for group in data["skills"]:
-            label = group.get("label", "")
-            items = ", ".join(group.get("items", []))
-            lines.append(f"{label}: {items}" if label else items)
 
     for section in visible_extras(data):
         lines += ["", section["title"].upper()]

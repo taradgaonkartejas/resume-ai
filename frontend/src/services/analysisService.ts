@@ -6,9 +6,10 @@ import type { AnalysisOut, AnalysisStepsOut, Finding } from "./types";
  * Mirrors backend/app/api/analysis.py.
  *
  * The score is deterministic: heuristics.py sets the number with fixed
- * weights (contact 15, summary 20, experience 45, format 20) and the LLM only
- * writes the explanation. Re-running analyze() on unchanged content yields
- * the same overall_score.
+ * weights (summary+education 10, skills 30, experience 45, projects 15) and
+ * the LLM only writes the explanation. Contact and format are advisory
+ * (knockout filter / parser blocker) — findings but 0 points. Re-running
+ * analyze() on unchanged content yields the same overall_score.
  */
 export const analysisService = {
   /** POST /api/resumes/{id}/analyze — runs the graph, returns 201. */
@@ -36,7 +37,7 @@ export function pointsTo80(overallScore: number): number {
   return Math.max(0, 80 - overallScore);
 }
 
-/** Total count across all four categories — the "N recommended improvements"
+/** Total count across all categories — the "N recommended improvements"
  *  badge. Defensive against a category arriving without notes. */
 export function totalFindings(analysis: AnalysisOut): number {
   return Object.values(analysis.category_scores).reduce(

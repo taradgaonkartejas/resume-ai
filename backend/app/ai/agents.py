@@ -410,7 +410,7 @@ def _rule_drafts(bullets, gaps: list[str], limit: int) -> list[dict]:
                 "target_ref": target_ref,
                 "placement": placement,
                 "original_text": text,
-                "suggested_text": text.rstrip(".") + f", leveraging {joined}.",
+                "suggested_text": text.rstrip(".") + f", using {joined}.",
                 "keywords": chunk,
                 "reasoning": f"Adds missing job-description keyword(s): {joined}.",
             }
@@ -810,6 +810,24 @@ def _rule_critique(original: str, draft: dict) -> CriticVerdict:
                 notes=f"introduces unsupported claim: {hint}",
                 severity="fabrication",
             )
+
+    # The AI-language check scores the resume; a rewrite that ADDS the words
+    # the scorer penalises would fix one card by creating a new one -- a
+    # loop the user can watch. Buzzwords already present in the original are
+    # the user's choice to keep, not ours to strip unasked, so only newly
+    # introduced hits reject.
+    from app.services import quality_rules as _qr
+
+    new_tells = sorted(
+        set(_qr.find_ai_language(suggested)) - set(_qr.find_ai_language(original))
+    )
+    if new_tells:
+        return CriticVerdict(
+            approved=False,
+            notes=f"introduces AI-flavoured wording the scorer penalises: "
+                  f"{', '.join(new_tells)}",
+            severity="minor",
+        )
 
     if len(suggested.split()) > 45:
         return CriticVerdict(
@@ -1232,10 +1250,17 @@ def review_ats(
     """
     acronyms = ats_rules.bare_acronyms(structured_data)
 
+    # Metric plausibility is the other judgement call this agent makes
+    # (Tier 2). A regex picks the CANDIDATES -- bullets containing a number
+    # -- but never decides anything; the number that "100 jobs/hour" is
+    # tiny for Kafka throughput and huge for brain surgeries is knowledge
+    # the agent supplies, and its answer is advice with no points attached.
+    candidates = metric_bullets(structured_data)
+
     # The gate. No question, no call -- a tidy resume costs nothing.
-    if not acronyms:
+    if not acronyms and not candidates:
         return AgentOutcome(
-            value={"expansions": [], "note": ""},
+            value={"expansions": [], "plausibility": [], "note": ""},
             agent="ats",
             notes=["no candidates"],
         )
@@ -1257,7 +1282,16 @@ def review_ats(
         except Exception as exc:  # noqa: BLE001
             logger.warning("ATS retrieval failed: %s", exc)
 
-    payload_parts = ["Skills written only as an acronym:\n" + ", ".join(acronyms)]
+    payload_parts: list[str] = []
+    if acronyms:
+        payload_parts.append(
+            "Skills written only as an acronym:\n" + ", ".join(acronyms)
+        )
+    if candidates:
+        payload_parts.append(
+            "Bullets containing metrics (judge plausibility only):\n"
+            + "\n".join(f"{ref}: {text}" for ref, text in candidates.items())
+        )
 
     try:
         parsed, call = llm.structured(
@@ -1268,7 +1302,7 @@ def review_ats(
             temperature=0.2,
         )
         return AgentOutcome(
-            value=_clean_ats_review(parsed, acronyms),
+            value=_clean_ats_review(parsed, acronyms, candidates),
             agent="ats",
             model=call.model,
             latency_ms=call.latency_ms,
@@ -1286,7 +1320,11 @@ def review_ats(
     )
 
 
-def _clean_ats_review(parsed: AtsReview, acronyms: list[str]) -> dict:
+def _clean_ats_review(
+    parsed: AtsReview,
+    acronyms: list[str],
+    candidates: dict[str, str] | None = None,
+) -> dict:
     """Keep only what the model was actually asked about.
 
     The same discipline as `_hard_check` on the writer path, for the same
@@ -1306,10 +1344,52 @@ def _clean_ats_review(parsed: AtsReview, acronyms: list[str]) -> dict:
                 {"acronym": token, "expanded": f"{full} ({token})" if token not in full else full}
             )
 
+    # Same discipline as the acronym filter: an advisory is kept only when
+    # it points at a bullet the agent was actually shown AND its quote
+    # appears verbatim in that bullet. A paraphrased or invented quote is
+    # advice about a number that never existed -- precisely the fabrication
+    # this function is here to stop, attached to a real person's resume.
+    plausibility = []
+    for item in parsed.plausibility or []:
+        ref = (item.bullet or "").strip()
+        quote = (item.quote or "").strip()
+        advice = (item.advice or "").strip()[:400]
+        if (
+            candidates is not None
+            and ref in candidates
+            and quote
+            and quote in candidates[ref]
+            and advice
+        ):
+            plausibility.append(
+                {"bullet": ref, "quote": quote, "advice": advice}
+            )
+
     return {
         "expansions": expansions,
+        "plausibility": plausibility,
         "note": (parsed.note or "").strip()[:400],
     }
+
+
+def metric_bullets(data: dict) -> dict[str, str]:
+    """Bullets that carry a number, keyed by their ref. Candidates, always.
+
+    The selection is mechanical and deliberately generous -- "some digits"
+    -- because it only decides what the agent is SHOWN. What the agent says
+    about a candidate is the judgement this feature was built for, and that
+    advice carries no points and no AI action by design.
+    """
+    import re
+
+    number = re.compile(r"\d")
+    out: dict[str, str] = {}
+    for ei, entry in enumerate(data.get("experience") or []):
+        for bi, bullet in enumerate(entry.get("bullets") or []):
+            text = str(bullet or "").strip()
+            if number.search(text):
+                out[f"exp_{ei}.bullet_{bi}"] = text
+    return out
 
 
 def _rule_ats_review() -> dict:
@@ -1353,8 +1433,58 @@ def _rule_ats_review() -> dict:
     The deterministic ATS findings in services/ats.py are unaffected and
     still score.
     """
-    return {"expansions": [], "note": ""}
+    return {"expansions": [], "plausibility": [], "note": ""}
 # ---------------------------------------------------------------- chat agent
+
+
+_SECRET_RE = re.compile(r"\b(?:gsk_|cc_|nvapi-|sk-)[A-Za-z0-9_\-]{6,}", re.I)
+
+
+def _failure_reason(exc: Exception) -> str:
+    """A short, safe explanation of why the agent could not answer.
+
+    The useful detail is in `LLMUnavailable("All models failed for task
+    chat: <per-model trace>")` -- which model, and whether it was a timeout,
+    a 429 or a 401. Until now that only ever reached the server log, so the
+    user saw "unreachable" with no way to tell a rate limit from a bad key.
+
+    Provider errors sometimes echo the request back, so anything shaped like
+    an API key is redacted before this leaves the process.
+    """
+    text = _SECRET_RE.sub("<redacted>", str(exc) or exc.__class__.__name__)
+    text = " ".join(text.split())
+    return f"{type(exc).__name__}: {text}"[:300]
+
+
+def _skills_block(structured_data: dict) -> str:
+    """Skill groups as read-only context.
+
+    Deliberately NOT part of the addressable-refs list. The model needs to
+    know skills exist so it can discuss them -- "Skills section" used to be
+    an unanswerable message -- but it must not be invited to write them.
+    Adding a skill the candidate does not have is the one fabrication this
+    codebase has already shipped once, and no amount of prompt wording makes
+    a model a reliable judge of what someone can claim.
+    """
+    groups = structured_data.get("skills") or []
+    lines = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        items = ", ".join(str(i) for i in (group.get("items") or []) if i)
+        if items:
+            lines.append(f"- {group.get('label') or 'Skills'}: {items}")
+    return "\n".join(lines) if lines else "(no skills listed)"
+
+
+def _history_block(history: list[tuple[str, str]] | None) -> str:
+    if not history:
+        return "(this is the first message)"
+    return "\n".join(
+        f"{'User' if role == 'user' else 'Assistant'}: {text}".strip()
+        for role, text in history
+        if (text or "").strip()
+    )
 
 
 def chat_reply(
@@ -1363,6 +1493,7 @@ def chat_reply(
     user_id: uuid.UUID | None = None,
     resume_id: uuid.UUID | None = None,
     store: VectorStore | None = None,
+    history: list[tuple[str, str]] | None = None,
 ) -> AgentOutcome:
     context = "(none)"
     if store is not None and user_id is not None:
@@ -1383,9 +1514,16 @@ def chat_reply(
             refs = "\n".join(
                 f"{ref} | {text}" for ref, _, text in resume_ops.iter_bullets(structured_data)
             )
+            # The conversation so far. Without it the assistant cannot see
+            # that it just asked a clarifying question, so the user's answer
+            # arrives as a standalone message and it asks again -- forever.
             payload = (
+                f"Conversation so far:\n{_history_block(history)}\n\n"
                 f"User: {prompt}\n\n"
-                f"Addressable bullets (target_ref | text):\n{refs[:3000]}"
+                f"Addressable bullets (target_ref | text):\n{refs[:3000]}\n\n"
+                f"Skills on this resume (context only -- you may discuss "
+                f"these but must NOT propose changes to them):\n"
+                f"{_skills_block(structured_data)}"
             )
             parsed, call = llm.structured(
                 task="chat",
@@ -1398,6 +1536,13 @@ def chat_reply(
                 structured_data, parsed.target_ref
             ):
                 parsed.proposes_change = False  # ungrounded: reply only
+            # `skills.N.items` IS a patchable ref, so the grounding check
+            # above would wave a skills edit through. Adding skills is
+            # advisory by product decision: the model cannot know what the
+            # candidate is entitled to claim, and a one-click accept would
+            # put an invented skill on a real resume.
+            if parsed.proposes_change and parsed.target_ref.startswith("skills"):
+                parsed.proposes_change = False
             return AgentOutcome(
                 value=parsed,
                 agent="chat",
@@ -1408,6 +1553,17 @@ def chat_reply(
                 used_llm=True,
             )
         except Exception as exc:  # noqa: BLE001
+            # A timeout, a 429, a dead model and a bad key all used to arrive
+            # here and leave as an indistinguishable `None`, which the service
+            # read as "use the rules" -- so an outage was presented to the
+            # user as a chatbot asking a vague question. `degraded` is the
+            # difference between "nothing to say" and "could not reach it".
             logger.warning("Chat agent fell back to rules: %s", exc)
+            return AgentOutcome(
+                value=None,
+                agent="chat",
+                status="degraded",
+                notes=[_failure_reason(exc)],
+            )
 
     return AgentOutcome(value=None, agent="chat", notes=["rule-engine reply"])

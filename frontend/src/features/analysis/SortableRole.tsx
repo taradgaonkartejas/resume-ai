@@ -18,9 +18,12 @@ import { cn } from "cn";
  */
 export function SortableRole({
   id,
+  label = "Reorder this role",
   children,
 }: {
   id: string;
+  /** Accessible name for the grip; word it after the thing being dragged. */
+  label?: string;
   children: React.ReactNode;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
@@ -41,7 +44,7 @@ export function SortableRole({
         type="button"
         {...attributes}
         {...listeners}
-        aria-label="Reorder this role"
+        aria-label={label}
         className="absolute right-2 top-2 inline-flex size-7 cursor-grab items-center
                    justify-center rounded-md text-content-muted
                    hover:bg-surface-3 hover:text-content active:cursor-grabbing

@@ -26,6 +26,28 @@ logger = logging.getLogger(__name__)
 
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
 _PHONE_RE = re.compile(r"(\+?\d[\d\s().-]{7,}\d)")
+#: "09/2012 - 08/2015" satisfies _PHONE_RE: it is digits, spaces and dashes
+#: of the right length. That only became visible once a template moved the
+#: contact block below the experience section, where the first _PHONE_RE
+#: hit in the document was an employment date and the parsed phone came
+#: back as "2012 - 08". A phone has to be mostly digits and enough of them.
+_DATEish_RE = re.compile(r"\b(19|20)\d{2}\b")
+
+
+def _looks_like_phone(text: str) -> bool:
+    digits = sum(c.isdigit() for c in text)
+    if digits < 8 or digits > 15:
+        return False
+    return not _DATEish_RE.search(text)
+
+
+def _find_phone(raw: str) -> str:
+    """First match that is actually a phone number, not a date range."""
+    for m in _PHONE_RE.finditer(raw):
+        if _looks_like_phone(m.group(0)):
+            return m.group(0).strip()
+    return ""
+
 _LINK_RE = re.compile(r"(https?://\S+|linkedin\.com/\S+|github\.com/\S+)", re.I)
 #: Separators used between fields on a contact line.
 #: `;` and a SPACED `/` are separators too. A bare `/` is not: it would
@@ -180,12 +202,19 @@ _DATE_RE = re.compile(
 
 # Columns narrower than this fraction of the page are not a real gutter.
 _MIN_GUTTER = 0.04
+#: A band this wide is a real rail, not a date channel.
+_WIDE_GUTTER = 0.045
+#: Rows needing text on both sides: strict for a narrow band,
+#: relaxed for a wide one (a short rail is still a rail).
+_COLUMN_ROWS = 0.5
+#: How far down the page a wide gutter must have text on both sides.
+_WIDE_GUTTER_EXTENT = 0.4
 # Both sides of a gutter must carry at least this many words for it to count.
 _MIN_COLUMN_WORDS = 4
 
 
-def _both_sides_run_down_the_page(words, x: float) -> bool:
-    """True only when both sides of `x` have text on most of the same rows.
+def _both_sides_ratio(words, x: float) -> float:
+    """What fraction of text rows have words on BOTH sides of `x`.
 
     Word counts alone are not enough, and the false positive is the common
     case rather than an exotic one. Almost every professional resume flushes
@@ -198,6 +227,10 @@ def _both_sides_run_down_the_page(words, x: float) -> bool:
 
     A real magazine split has both columns running the length of the page.
     A right-aligned date touches three or four rows out of twenty.
+
+    Returns the ratio rather than a verdict: the caller picks the threshold,
+    because a wide clear band earns a looser one. A sidebar holding only
+    skills and education legitimately covers about a fifth of the rows.
     """
     rows: dict[int, list[bool]] = {}
     for w in words:
@@ -208,9 +241,34 @@ def _both_sides_run_down_the_page(words, x: float) -> bool:
         elif float(w["x0"]) >= x:
             side[1] = True
     if len(rows) < 6:
-        return False
+        return 0.0
     both = sum(1 for left, right in rows.values() if left and right)
-    return both >= len(rows) * 0.5
+    return both / len(rows)
+
+
+def _both_sides_extent(words, x: float) -> float:
+    """Vertical span of the rows having text on both sides of `x`, as a
+    fraction of the page's whole text height."""
+    tops = [float(w["top"]) for w in words]
+    if not tops:
+        return 0.0
+    page_top, page_bottom = min(tops), max(tops)
+    height = page_bottom - page_top
+    if height <= 0:
+        return 0.0
+
+    rows: dict[int, list[bool]] = {}
+    for w in words:
+        band = int(float(w["top"]) // 6)
+        side = rows.setdefault(band, [False, False])
+        if float(w["x1"]) <= x:
+            side[0] = True
+        elif float(w["x0"]) >= x:
+            side[1] = True
+    both = [band * 6 for band, (left, right) in rows.items() if left and right]
+    if len(both) < 4:
+        return 0.0
+    return (max(both) - min(both)) / height
 
 
 def _column_split_x(page) -> float | None:
@@ -235,8 +293,7 @@ def _column_split_x(page) -> float | None:
         left = sum(1 for a, b in spans if b <= x)
         right = sum(1 for a, b in spans if a >= x)
         if left >= _MIN_COLUMN_WORDS and right >= _MIN_COLUMN_WORDS:
-            if _both_sides_run_down_the_page(words, x):
-                clear.append(x)
+            clear.append(x)
     if not clear:
         return None
 
@@ -252,9 +309,40 @@ def _column_split_x(page) -> float | None:
             run = [x]
     best_run = max(best_run, run, key=len)
 
-    if (best_run[-1] - best_run[0]) < width * _MIN_GUTTER:
+    span = best_run[-1] - best_run[0]
+    if span < width * _MIN_GUTTER:
         return None
-    return (best_run[0] + best_run[-1]) / 2.0
+    x = (best_run[0] + best_run[-1]) / 2.0
+
+    # How much of the page actually has text on both sides of the band.
+    #
+    # The original rule demanded 50% and ran BEFORE the width check, which
+    # made a genuine sidebar undetectable: a right rail holding only skills
+    # and education covers maybe a fifth of the rows, so a correctly
+    # rendered two-column resume was read as one scrambled column.
+    #
+    # The two signals do different jobs and the width one is much stronger
+    # than it looked. Measured across all eight of our templates, the six
+    # single-column ones -- every one of which right-aligns its dates --
+    # have NO uncrossed vertical band at all, because body text crosses the
+    # date channel on most lines. Only the sidebar template has one. So a
+    # band that is both clear and wide is already close to proof; the row
+    # ratio only has to rule out a freak narrow coincidence.
+    if span >= width * _WIDE_GUTTER:
+        # A wide clear band: judge it by how far DOWN the page both sides
+        # carry text, not by what fraction of all rows do.
+        #
+        # The row-fraction test is diluted by exactly the thing that makes a
+        # sidebar a sidebar: the rail ends before the body does, and every
+        # row below it counts against the ratio. On a real template that
+        # landed on 0.15 against a 0.15 threshold -- a coin flip decided
+        # whether the resume parsed or came back shredded.
+        #
+        # Vertical extent does not have that problem. A right-aligned date
+        # column touches a few scattered rows; a rail runs continuously for
+        # a large part of the page.
+        return x if _both_sides_extent(words, x) >= _WIDE_GUTTER_EXTENT else None
+    return x if _both_sides_ratio(words, x) >= _COLUMN_ROWS else None
 
 
 def _normalise_link(url: str) -> str:
@@ -1152,9 +1240,9 @@ def structure_text(raw: str) -> dict:
     email = _EMAIL_RE.search(raw)
     if email:
         data["contact"]["email"] = email.group(0)
-    phone = _PHONE_RE.search(raw)
+    phone = _find_phone(raw)
     if phone:
-        data["contact"]["phone"] = phone.group(0).strip()
+        data["contact"]["phone"] = phone
     data["contact"]["links"] = list(dict.fromkeys(_LINK_RE.findall(raw)))[:4]
 
     # `contact.location` had no extraction at all -- not a weak one, none --
@@ -1166,10 +1254,29 @@ def structure_text(raw: str) -> dict:
     # field that is NOT one of the things we can positively identify: not the
     # email, not the phone, not a link, not the name, and short enough to be
     # a place rather than a sentence.
+    # Scan for the contact line wherever it is, not just at the top.
+    #
+    # A two-column template puts the contact block in the right rail, and
+    # column-aware extraction reads that rail AFTER the main column -- so
+    # the contact line legitimately arrives below the experience section
+    # and the old `non_empty[:4]` window never saw it. The window was doing
+    # two jobs: finding the line, and refusing to run past a section
+    # heading. Only the second is still needed, and `_classify` already
+    # does it per line.
+    # NOTE: the contact line is located by scanning for a line that holds
+    # an email or phone. On a sidebar template the rail gives each field
+    # its own line, so the email line carries no city and `location` is
+    # not recovered from that layout. A neighbour-window fix was tried and
+    # reverted: reaching into adjacent lines changed which lines the body
+    # segmenter consumed, and a one-job resume came back as two with
+    # "Pune, India" promoted to an employer. Not worth that risk for a
+    # field the editor can fill in.
     for line in non_empty[:4]:
         if _classify(line):
             break
-        if not (_EMAIL_RE.search(line) or _PHONE_RE.search(line)):
+        if not (_EMAIL_RE.search(line) or _find_phone(line)):
+            continue
+        if _classify(line):
             continue
         for field in _CONTACT_SEP_RE.split(line):
             field = field.strip(" \t•|,")

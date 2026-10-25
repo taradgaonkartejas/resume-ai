@@ -163,11 +163,14 @@ def _evaluate_inner(case: dict) -> dict:
 #
 # Pre-registered, with the granularity written down -- because a threshold a
 # metric cannot express is a different gate than the one you think you set.
-# There are 7 fixable cases, so the only reachable rates are k/7:
+# There are 8 fixable cases (one projects case joined on 2026-10-25 when
+# projects became a scored category; its sibling decline case retired the
+# same day when the owner dropped the projects metric check), so the only
+# reachable rates are k/8:
 #
-#   0%  14.3%  28.6%  42.9%  57.1%  71.4%  85.7%  100%
+#   0%  12.5%  25%  37.5%  50%  62.5%  75%  87.5%  100%
 #
-# 0.70 therefore means "at least 5 of 7". It is NOT a 70% bar.
+# 0.70 therefore means "at least 6 of 8". It is NOT a 70% bar.
 #
 # Why a floor is needed at all: before this, a writer that declined every
 # single case scored `resisted inventing 3/3`, `FABRICATIONS 0` and exited 0.
@@ -180,8 +183,9 @@ def _evaluate_inner(case: dict) -> dict:
 #   codecraft:claude-sonnet-5          7/7   (2026-10-11, clean single-model)
 #   codecraft:claude-sonnet-5          6/7   (earlier, length bug present)
 #   nvidia:nemotron-3-ultra-550b       4/7   (fallback, visibly weaker)
-MIN_FIX_RATE = 0.70          # >= 5/7
-MIN_REACHES_USER = 0.70      # >= 5/7; a fix the critic blocks helps nobody
+# Those reference rows predate the two projects cases; denominators then were 7.
+MIN_FIX_RATE = 0.70          # >= 6/8 in the 8-case corpus (was 5/7)
+MIN_REACHES_USER = 0.70      # >= 6/8; a fix the critic blocks helps nobody
 
 
 def main() -> int:

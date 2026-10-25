@@ -108,10 +108,12 @@ def test_fixing_the_resume_moves_the_score_without_re_running_analyze(
 
     resume = db.get(Resume, _uuid.UUID(str(resume_id)))
     data = dict(resume.structured_data or {})
-    contact = dict(data["contact"])
-    contact["phone"] = "+91 98765 43210"
-    contact["location"] = "Pune, India"
-    data["contact"] = contact
+    # A SCORED fix: contact is an advisory gate (0 points) since 2026-10-25,
+    # so fixing contact fields deliberately cannot move the number any more.
+    data["skills"] = [
+        {"label": "Core", "items": ["Python", "Go", "SQL", "AWS"]},
+        {"label": "Platform", "items": ["Kubernetes", "Docker", "Linux", "Terraform"]},
+    ]
     resume.structured_data = data
     db.commit()
 
@@ -135,24 +137,26 @@ def test_category_scores_and_findings_are_live_too(client, priya):
     db = _seed_report(client, resume_id, stored_score=79)
 
     body = _analysis(client, priya, resume_id)
-    contact_before = body["category_scores"]["contact"]["score"]
-    # The seeded row claimed 0/15 for contact; a live read must not echo it.
-    assert contact_before > 0
+    skills_before = body["category_scores"]["skills"]["score"]
+    # The seeded row claimed 0 for a scored category; a live read must not
+    # echo it. (Skills, not contact: contact now caps at 0 by design.)
+    assert skills_before < 30
+    assert skills_before < body["category_scores"]["skills"]["max"]
 
     resume = db.get(Resume, _uuid.UUID(str(resume_id)))
     data = dict(resume.structured_data or {})
-    contact = dict(data["contact"])
-    contact["phone"] = "+91 98765 43210"
-    contact["location"] = "Pune, India"
-    data["contact"] = contact
+    data["skills"] = [
+        {"label": "Core", "items": ["Python", "Go", "SQL", "AWS"]},
+        {"label": "Platform", "items": ["Kubernetes", "Docker", "Linux", "Terraform"]},
+    ]
     resume.structured_data = data
     db.commit()
 
-    after = _analysis(client, priya, resume_id)["category_scores"]["contact"]
-    assert after["score"] > contact_before
+    after = _analysis(client, priya, resume_id)["category_scores"]["skills"]
+    assert after["score"] > skills_before
     # Fixed findings disappear rather than lingering as unearnable points.
     refs = {f["id"] for f in after["findings"]}
-    assert not {"contact.phone.missing", "contact.location.missing"} & refs
+    assert "skills.missing" not in refs
 
 
 def test_reading_the_analysis_does_not_rewrite_the_stored_report(client, priya):

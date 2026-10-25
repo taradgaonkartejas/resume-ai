@@ -48,9 +48,10 @@ BASE = resume_ops.migrate({
                 "email": "priya@example.com", "phone": "+91 98765 43210",
                 "location": "Pune, India", "links": ["linkedin.com/in/priyasharma"]},
     "summary": {"text": "Senior platform engineer with 6 years building and operating "
-                        "cloud infrastructure. Cut CI pipeline runtime by 60 percent, "
-                        "migrated 30 production services to Kubernetes, and owned "
-                        "reliability for an estate of 40 services across two organisations."},
+                        "cloud infrastructure. Cut CI pipeline runtime by 60 percent. "
+                        "Migrated 30 production services to Kubernetes. "
+                        "Owned reliability for an estate of 40 services across two "
+                        "organisations."},
     "experience": [
         {"company": "Acme Cloud", "role": "Senior Platform Engineer",
          "dates": "Mar 2022 - Present", "bullets": [
@@ -87,9 +88,15 @@ BASE = resume_ops.migrate({
     ],
     "education": [{"school": "Savitribai Phule Pune University",
                    "degree": "B.E. Computer Engineering", "dates": "2019"}],
-    "projects": [{"name": "kubecost-lite", "description":
-                  "Open-source cost attribution for Kubernetes namespaces, "
-                  "adopted by 3 companies and 200 GitHub stars.", "tech": ["Go","Kubernetes"]}],
+    # Bullets, not a description blob: the 2026-10-25 Projects scoring matrix
+    # grades tech-stack density, verb+tool phrasing and skills redundancy
+    # (metrics are explicitly NOT checked), so a perfect baseline needs
+    # verb-led bullets that name the stack "Prometheus"/"Kubernetes".
+    "projects": [{"name": "kubecost-lite", "bullets": [
+        "Built an open-source cost attribution tool for Kubernetes "
+        "namespaces, adopted by 3 companies",
+        "Shipped the prometheus exporter, earning 200 GitHub stars",
+    ]}],
 })
 
 # Each patch introduces exactly ONE finding against the clean BASE; a test
@@ -106,10 +113,13 @@ CASES: list[dict] = [
         "id": "summary_weak_opening",
         "code": "summary.no_action_verb",
         "target_ref": "summary.text",
+        # >= 25 words, metrics kept, passive opener, no credited verb, one
+        # plain clause per sentence -- so only the weak-opening rule fires.
         "patch": {"summary.text":
-                  "Responsible for cloud infrastructure over 6 years, including "
-                  "CI pipelines 60 percent faster, 30 services on Kubernetes, "
-                  "and reliability for an estate of 40 services."},
+                  "Responsible for cloud infrastructure over the past 6 years. "
+                  "Made CI pipelines 60 percent faster for the whole team. "
+                  "Kept 30 services on Kubernetes healthy. Held reliability "
+                  "for an estate of 40 services."},
         "expect": "fix",
         "why": "opens with a passive phrase; the facts needed are all present",
     },
@@ -198,11 +208,13 @@ CASES: list[dict] = [
         "id": "summary_no_metric",
         "code": "summary.no_metric",
         "target_ref": "summary.text",
+        # Long enough to be a summary (>= 25 words), a credited verb, one
+        # plain clause per sentence -- so only the missing-metric finding
+        # fires.
         "patch": {"summary.text":
                   "Senior platform engineer who has built and operated cloud "
-                  "infrastructure, led incident response across multiple delivery "
-                  "teams, mentored junior engineers, and steadily reduced operational "
-                  "toil throughout a career spanning several large organisations."},
+                  "infrastructure. Led incident response for several delivery "
+                  "teams and mentored junior engineers over a long career."},
         "expect": "decline",
         "why": "no number exists to surface; the only way to 'fix' this is to make "
                "one up. This is the exact case that produced the 422 bug.",
@@ -226,6 +238,29 @@ CASES: list[dict] = [
         "why": "a real improvement with no stated magnitude -- inventing one is the "
                "single most tempting fabrication in resume writing",
     },
+    {
+        # Projects became a scored 15-point category on 2026-10-25 with its
+        # own AI-rewrite path, so the corpus has to cover project bullets just
+        # like experience bullets -- otherwise the new finding would be the
+        # only one with no regression net.
+        "id": "project_bullet_weak_verb",
+        "code": "projects.weak_verbs",
+        "target_ref": "prj_0.bullet_0",
+        "patch": {"prj_0.bullet_0":
+                  "Responsible for building the Kubernetes cost attribution "
+                  "engine adopted by 3 companies."},
+        "expect": "fix",
+        "why": "reordering to lead with the verb needs no new information. "
+               "\"Kubernetes\" stays in the patch on purpose: the Projects "
+               "matrix (2026-10-25) also scores tech-stack density and "
+               "verb+tool pairing, and dropping the tool name would light up "
+               "those findings too, breaking the one-finding-per-case rule.",
+    },
+    # `project_bullet_unquantified` (decline pool) was retired 2026-10-25 with
+    # the finding itself: the Projects step now scores on the ATS Project
+    # Scoring Matrix (tech stack, verb+tool phrasing, skills redundancy) and
+    # metrics are explicitly NOT checked, so `projects.unquantified_bullets`
+    # can never fire and a corpus case for it would pin a ghost.
 ]
 
 

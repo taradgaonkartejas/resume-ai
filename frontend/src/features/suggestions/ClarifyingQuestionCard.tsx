@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { HelpCircle, Loader2 } from "lucide-react";
+import { Check, HelpCircle, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAnswerQuestion } from "@/api/queries";
 import type { SuggestionOut } from "@/services";
@@ -21,6 +21,110 @@ import type { SuggestionOut } from "@/services";
  *  3. **"Not really" is a real button, not a dismissal X.** If saying no is
  *     harder than saying yes, the answers stop being worth anything.
  */
+/**
+ * The skills variant: a multiple choice, not a free-text claim.
+ *
+ * Nothing is pre-selected. Pre-ticking every box would make the default
+ * state "I have all of these", which is exactly the claim the user is here
+ * to make deliberately -- the whole reason this is a question card and not
+ * an AI-written draft.
+ *
+ * The chips come from `suggestion.keywords`, which the server put there; the
+ * submitted list is checked back against it server-side, so a tampered
+ * client cannot widen the menu.
+ */
+function SkillPicker({
+  suggestion,
+  resumeId,
+  sessionId = null,
+  readOnly = false,
+  onResolved,
+}: {
+  suggestion: SuggestionOut;
+  resumeId: string;
+  sessionId?: string | null;
+  readOnly?: boolean;
+  onResolved?: (outcome: "attested" | "declined") => void;
+}) {
+  const answerMutation = useAnswerQuestion(resumeId, sessionId ?? null);
+  const [picked, setPicked] = useState<string[]>([]);
+  const busy = answerMutation.isPending;
+
+  function toggle(skill: string) {
+    setPicked((prev) =>
+      prev.includes(skill) ? prev.filter((s) => s !== skill) : [...prev, skill],
+    );
+  }
+
+  function submit(selection: string[]) {
+    answerMutation.mutate(
+      { id: suggestion.id, answer: selection.join(", "), confirmed: selection.length > 0 },
+      {
+        onSuccess: (updated) =>
+          onResolved?.(updated.attested ? "attested" : "declined"),
+      },
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-line-soft bg-surface-2 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="flex items-center gap-1 rounded-full bg-brand/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-content-accent">
+          <HelpCircle className="size-3" />
+          Pick what you can back up
+        </span>
+        <span className="ml-auto text-xs text-muted">{suggestion.placement}</span>
+      </div>
+
+      <p className="mt-2 text-sm leading-relaxed text-ink">{suggestion.question}</p>
+
+      {!readOnly && (
+        <>
+          <ul className="mt-3 flex flex-wrap gap-1.5">
+            {suggestion.keywords.map((skill) => {
+              const on = picked.includes(skill);
+              return (
+                <li key={skill}>
+                  <button
+                    type="button"
+                    aria-pressed={on}
+                    disabled={busy}
+                    onClick={() => toggle(skill)}
+                    className={
+                      "rounded-full border px-2.5 py-1 text-xs transition-colors " +
+                      (on
+                        ? "border-change-border bg-change text-on-change"
+                        : "border-line bg-surface-1 text-ink hover:border-brand")
+                    }
+                  >
+                    {on && <Check className="mr-1 inline size-3" aria-hidden />}
+                    {skill}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Button size="sm" onClick={() => submit(picked)} disabled={busy || !picked.length}>
+              {busy && <Loader2 className="mr-1 size-3 animate-spin" />}
+              {picked.length
+                ? `Add ${picked.length} skill${picked.length === 1 ? "" : "s"}`
+                : "Select skills to add"}
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => submit([])} disabled={busy}>
+              None of these
+            </Button>
+            <span className="text-xs text-muted">
+              Added as yours, not as an AI edit.
+            </span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function ClarifyingQuestionCard({
   suggestion,
   resumeId,
@@ -36,6 +140,26 @@ export function ClarifyingQuestionCard({
 }) {
   const answerMutation = useAnswerQuestion(resumeId, sessionId ?? null);
   const [text, setText] = useState("");
+
+  // Skills are a choice over a list, not a claim about one keyword, so they
+  // get their own grammar rather than a textarea asking "where did you use
+  // java8/17/21, springboot3, activemq".
+  //
+  // Keyed on target_ref, NOT section: the tailoring clarifying flow is also
+  // section="skills" (with an empty target_ref) and asks about exactly one
+  // keyword -- routing it here would replace a careful question with a
+  // one-chip picker.
+  if (suggestion.target_ref === "skills") {
+    return (
+      <SkillPicker
+        suggestion={suggestion}
+        resumeId={resumeId}
+        sessionId={sessionId}
+        readOnly={readOnly}
+        onResolved={onResolved}
+      />
+    );
+  }
 
   const skill = suggestion.keywords[0] ?? "this";
   const busy = answerMutation.isPending;

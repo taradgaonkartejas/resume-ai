@@ -50,7 +50,9 @@ FILLER_PHRASES: frozenset[str] = frozenset({
 
 
 def _normalise(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    # Apostrophes FIRST: "today's" must match the stored phrase "todays ...",
+    # not become "today s" after the generic punctuation collapse below.
+    return re.sub(r"[^a-z0-9]+", " ", text.lower().replace("'", "").replace("\u2019", "")).strip()
 
 
 def find_filler(text: str) -> list[str]:
@@ -247,3 +249,100 @@ def find_present_tense(bullets: list[str]) -> list[int]:
         i for i, bullet in enumerate(bullets)
         if opener(bullet) in PRESENT_TENSE_OPENERS
     ]
+
+
+# ------------------------------------------------------ complex sentences ---
+#
+# Two shapes trip the reader, not one, so both are flagged: sheer length, and
+# clause chaining (comma/semicolon-colon-dashed subordinations). Average
+# sentence length alone is gameable by splitting one overloaded sentence into
+# two mid-length ones, so BOTH the sentence-word cap AND the clause count are
+# checked. Thresholds are consensus resume-style territory: a bullet reads
+# best under ~25 words; the scorer's own bullets coach 30
+# (heuristics.BULLET_COACHED_MAX), so the detector must accuse nothing the
+# coach advises.
+#
+_sentence_SPLIT = re.compile(r"[.!?]+(?:\s|$)")
+_CLAUSE_MARKS = re.compile(r"[,;:—–]| - ")
+
+COMPLEX_SENTENCE_WORDS = 30       # one sentence this long is never "plain"
+COMPLEX_CLAUSE_WORDS = 15         # shorter, but clause-chained/list-packed
+
+
+def find_complex_sentences(text: str) -> list[str]:
+    """Sentences that are long or clause-chained, as written.
+
+    The detector only reads inside `text`; sentence-splitting is by terminal
+    punctuation, so a bullet without a period is treated as one sentence.
+    Returns the offending sentences verbatim, shortened to the start, so the
+    finding can quote the evidence rather than assert it.
+    """
+    hits: list[str] = []
+    for sentence in _sentence_SPLIT.split(text):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        words = len(sentence.split())
+        clauses = len(_CLAUSE_MARKS.findall(sentence)) + 1
+        if words > COMPLEX_SENTENCE_WORDS or (
+            words > COMPLEX_CLAUSE_WORDS and clauses >= 3
+        ):
+            hits.append(sentence)
+    return hits
+
+
+# ------------------------------------------------------------ AI language ---
+#
+# Words and phrases a modern LLM puts in nearly every resume it writes, so a
+# pile of them reads generated even when every claim is true. This lexicon is
+# a STRONGER check than the filler list: filler phrases are empty claims
+# ("results driven"), while these are the model's verbal fingerprint. The two
+# sets are kept apart deliberately -- the fix advice differs (state the work
+# vs. say it plainly).
+#
+# Broad set, per owner direction 2026-10-25: also catches "leverage",
+# "robust", "passionate" and friends -- knowing some human-written resumes
+# will be flagged. None of these words are in the action-verb credit lists in
+# heuristics.py, because praising and punishing the same token would be
+# incoherent scoring; "spearheaded" et al. stay credited verbs, not hits.
+AI_BUZZWORDS: frozenset[str] = frozenset({
+    # the classic LLM tells
+    "delve", "delved", "delving",
+    "tapestry",
+    "in todays fast paced world", "in todays digital landscape",
+    "fast paced world", "todays competitive", "ever evolving",
+    "furthermore", "moreover",
+    "seamlessly", "seamless",
+    "meticulous", "meticulously",
+    "effortless", "effortlessly",
+    "pivotal",
+    "spearheading innovation",
+    # the broad tail (still flagged, lower confidence)
+    "leverage", "leveraged", "leveraging",
+    "robust",
+    "passionate about", "passionate",
+    "cutting edge", "state of the art",
+    "dynamic",
+    "showcasing", "showcase",
+    "fostered", "fostering",
+    "adept at", "adept",
+    "invaluable",
+    "proven expertise",
+})
+
+
+def find_ai_language(text: str) -> list[str]:
+    """AI-fingerprint lexicon hits in `text`, same matching as find_filler.
+
+    Word boundaries against the normalised string -- "adept" inside a longer
+    word never matches, and "cutting-edge" matches the stored form
+    "cutting edge" because normalisation collapses the hyphen.
+    """
+    padded = f" {_normalise(text)} "
+    hits = [p for p in AI_BUZZWORDS if f" {p} " in padded]
+    # A longer phrase that CONTAINS a shorter one ("in todays fast paced
+    # world" and "fast paced world") is one observation, not two -- count the
+    # longest carrier only, so the card never lists three hits for one tell.
+    return sorted(
+        p for p in hits if not any(p != q and p in q for q in hits)
+    )

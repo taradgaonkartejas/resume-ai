@@ -16,12 +16,11 @@ import { partitionFormatFindings, runFormatFixes } from "./formatFixes";
  * 2. **The button does not claim to "format your resume".** Of the format
  *    step's findings only some can be resolved without the user: today one
  *    is deterministic (reorder) and one can be drafted by the writer. The
- *    rest -- no skills section, no education, too thin, too long,
- *    unparseable dates, decorative glyphs -- need information or a judgement
- *    only the user has. A button labelled "Format My Resume" that silently
- *    leaves five findings standing is a promise the product cannot keep, so
- *    the copy states the counts up front and the summary states what
- *    actually happened.
+ *    rest -- too thin, too long, unparseable dates, decorative glyphs --
+ *    need information or a judgement only the user has. A button labelled
+ *    "Format My Resume" that silently leaves findings standing is a promise
+ *    the product cannot keep, so the copy states the counts up front and the
+ *    summary states what actually happened.
  */
 export function FormatStepPanel({
   steps,

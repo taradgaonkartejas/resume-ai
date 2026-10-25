@@ -18,6 +18,23 @@ from app.services.suggestion_service import SuggestionService
 router = APIRouter(tags=["suggestions"])
 
 
+@router.get("/suggestions/{suggestion_id}", response_model=SuggestionOut)
+def get_suggestion(
+    suggestion_id: uuid.UUID,
+    user_id: CurrentUser,
+    svc: Annotated[SuggestionService, Depends(suggestion_service)],
+):
+    """One card by id, scoped to its owner.
+
+    The chat pane stores only a `suggestion_id` against a message, so on
+    reload it cannot tell an ordinary draft from a question card -- and
+    offering Accept on a question raises, which left the skills picker
+    unreachable from chat. Status is live state, so it is read, not cached
+    into the transcript.
+    """
+    return svc.get(suggestion_id, user_id)
+
+
 @router.patch("/suggestions/{suggestion_id}", response_model=SuggestionOut)
 def act_on_suggestion(
     suggestion_id: uuid.UUID,

@@ -65,7 +65,12 @@ try {
     readFileSync(join(dir, "rank.js"), "utf8"),
   );
 
-  const { roleIndexOf, groupFindingsByRole } = await import(`file://${out}`);
+  const {
+    roleIndexOf,
+    entryIndexOf,
+    groupFindingsByRole,
+    groupFindingsByEntry,
+  } = await import(`file://${out}`);
 
   let pass = 0;
   let fail = 0;
@@ -138,6 +143,48 @@ try {
 
   const r3 = groupFindingsByRole([f("y", "exp_0.b")], undefined);
   eq("no data -> everything ungrouped", r3.ungrouped.map((x) => x.id), ["y"]);
+
+  // ---- projects, added when the category became scored on 2026-10-25 ------
+  eq("entryIndexOf prj_2.bullet_1", entryIndexOf("prj_2.bullet_1", "prj"), 2);
+  eq("entryIndexOf prj_0", entryIndexOf("prj_0", "prj"), 0);
+  // The prefix is what keeps a project ref from being read as a role.
+  eq("entryIndexOf prj_1 vs exp prefix", entryIndexOf("prj_1", "exp"), null);
+  eq("entryIndexOf exp_1 vs prj prefix", entryIndexOf("exp_1", "prj"), null);
+  eq("entryIndexOf projects", entryIndexOf("projects", "prj"), null);
+  eq("entryIndexOf prj_abc", entryIndexOf("prj_abc", "prj"), null);
+
+  const pdata = {
+    projects: [
+      { name: "kubecost-lite" },
+      { name: "" },
+    ],
+  };
+  const p1 = groupFindingsByEntry(
+    [
+      f("a", "prj_1.bullet_0"),
+      f("b", "prj_0.bullet_0"),
+      f("c", "exp_0.bullet_0"), // a project step never gets exp refs, but be safe
+      f("d", "prj_0.bullet_1"),
+    ],
+    pdata,
+    "projects",
+  );
+  eq("project groups sorted by index", p1.groups.map((g) => g.key), [
+    "prj_0",
+    "prj_1",
+  ]);
+  eq("exp ref on projects step -> ungrouped", p1.ungrouped.map((x) => x.id), ["c"]);
+  eq("project name as title", p1.groups[0].title, "kubecost-lite");
+  eq("unnamed project gets positional title", p1.groups[1].title, "Project 2");
+  eq("projects carry no subtitle", p1.groups[0].subtitle, "");
+  eq("same project collected", p1.groups[0].findings.map((x) => x.id).sort(), [
+    "b",
+    "d",
+  ]);
+
+  const p2 = groupFindingsByEntry([f("x", "prj_7.bullet_0")], pdata, "projects");
+  eq("deleted project ref -> ungrouped", p2.ungrouped.map((x) => x.id), ["x"]);
+  eq("deleted project invents no group", p2.groups.length, 0);
   eq("no data -> no groups", r3.groups.length, 0);
 
   eq("empty input", groupFindingsByRole([], data), {

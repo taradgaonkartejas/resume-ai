@@ -239,19 +239,27 @@ export function AnalysisStepper({
               <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold">
                 Recommendations
                 <Badge variant="secondary">{step.findings.length}</Badge>
-                <span className="ml-auto text-xs font-normal text-content-muted">
-                  worth {step.points_available} point
-                  {step.points_available === 1 ? "" : "s"}
-                </span>
+                {step.advisory ? (
+                  <span className="ml-auto text-xs font-normal text-content-muted">
+                    pass/fail — no points
+                  </span>
+                ) : (
+                  <span className="ml-auto text-xs font-normal text-content-muted">
+                    worth {step.points_available} point
+                    {step.points_available === 1 ? "" : "s"}
+                  </span>
+                )}
               </h3>
-              {/* Experience is the only step with repeating subjects: the
-                  same "weak verb" finding can appear five times, once per
-                  job, distinguishable only by reading target_ref. Every
-                  other step has a single subject and a flat list is right. */}
-              {step.id === "experience" ? (
+              {/* Experience and Projects are the steps with repeating
+                  subjects: the same "weak verb" finding can appear five
+                  times, once per entry, distinguishable only by reading
+                  target_ref. Every other step has a single subject and a
+                  flat list is right. */}
+              {step.id === "experience" || step.id === "projects" ? (
                 <GroupedFindings
                   findings={step.findings}
                   data={draft}
+                  section={step.id}
                   resumeId={resumeId}
                   onFix={onFix}
                   onFixed={(f) => onFixed(step.id, f)}
@@ -405,11 +413,17 @@ function SectionList({
                 <span className="mt-0.5 block text-xs text-content-muted">
                   {step.status === "optional"
                     ? "Optional \u2014 not scored"
-                    : step.finding_count === 0
-                      ? "No issues found"
-                      : `${step.finding_count} recommendation${
-                          step.finding_count === 1 ? "" : "s"
-                        }`}
+                    : step.advisory
+                      ? step.finding_count === 0
+                        ? "All gate checks pass"
+                        : `${step.finding_count} gate check${
+                            step.finding_count === 1 ? "" : "s"
+                          } failed`
+                      : step.finding_count === 0
+                        ? "No issues found"
+                        : `${step.finding_count} recommendation${
+                            step.finding_count === 1 ? "" : "s"
+                          }`}
                 </span>
               </span>
               {step.points_available > 0 && (
@@ -480,7 +494,11 @@ function StepHeader({
           {step.title}
         </h2>
         <span className="ml-auto text-xs tabular-nums text-content-muted">
-          {step.score}/{step.max}
+          {step.max > 0
+            ? `${step.score}/${step.max}`
+            : step.advisory
+              ? "gate"
+              : "optional"}
         </span>
       </div>
       <p className="mt-1 text-xs leading-relaxed text-content-muted">
